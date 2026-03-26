@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useEffect, useEffectEvent, useState } from "react";
+import { startTransition, useEffect, useState } from "react";
 
 import type {
   CheckoutEnvironment,
@@ -134,11 +134,23 @@ function getCartTotal(items: CartItem[]) {
   );
 }
 
+async function fetchDemoStateFromServer() {
+  const response = await fetch("/api/coinbase/state", {
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error("Unable to refresh checkout activity.");
+  }
+
+  return (await response.json()) as DemoStatePayload;
+}
+
 function EventFeed({ events }: { events: DemoEventRecord[] }) {
   if (events.length === 0) {
     return (
       <div className="rounded-[1.5rem] border border-dashed border-[var(--line)] px-4 py-5 text-sm leading-7 text-[var(--ink-soft)]">
-        No webhook events yet.
+        No recent activity yet.
       </div>
     );
   }
@@ -191,9 +203,6 @@ export function CoinbaseDemo({ initialState }: CoinbaseDemoProps) {
   const [eventStreamStatus, setEventStreamStatus] = useState("connecting");
   const [origin, setOrigin] = useState("");
   const [demoState, setDemoState] = useState(initialState);
-  const [activeCheckout, setActiveCheckout] = useState<CoinbaseCheckout | null>(
-    initialState.checkouts[0] ?? null,
-  );
 
   const cartTotal = getCartTotal(cartItems);
   const donationValue = Number.parseFloat(donationAmount || "0");
@@ -201,6 +210,13 @@ export function CoinbaseDemo({ initialState }: CoinbaseDemoProps) {
   const isValidAmount = Number.isFinite(totalAmount) && totalAmount > 0;
   const webhookUrl = `${origin}${demoState.webhookPaths[environment]}`;
   const redirectBaseUrl = origin.startsWith("https://") ? origin : "";
+  const checkoutsForEnvironment = demoState.checkouts.filter(
+    (checkout) => checkout.demoEnvironment === environment,
+  );
+  const activeCheckout = checkoutsForEnvironment[0] ?? null;
+  const eventsForEnvironment = demoState.events.filter(
+    (event) => event.environment === environment,
+  );
   const metadata =
     flowMode === "cart"
       ? buildCartMetadata(cartItems, reference, note)
@@ -218,38 +234,41 @@ export function CoinbaseDemo({ initialState }: CoinbaseDemoProps) {
     setOrigin(window.location.origin);
   }, []);
 
-  useEffect(() => {
-    if (!activeCheckout?.demoEnvironment) {
-      return;
+  async function refreshDemoState() {
+    try {
+      const nextState = await fetchDemoStateFromServer();
+      startTransition(() => {
+        setDemoState(nextState);
+      });
+      setEventStreamStatus("live");
+    } catch {
+      setEventStreamStatus("reconnecting");
     }
-
-    const refreshedCheckout = demoState.checkouts.find(
-      (checkout) =>
-        checkout.id === activeCheckout.id &&
-        checkout.demoEnvironment === activeCheckout.demoEnvironment,
-    );
-
-    if (refreshedCheckout) {
-      setActiveCheckout(refreshedCheckout);
-    }
-  }, [activeCheckout, demoState.checkouts]);
-
-  const applyStreamState = useEffectEvent((nextState: DemoStatePayload) => {
-    startTransition(() => {
-      setDemoState(nextState);
-    });
-  });
+  }
 
   useEffect(() => {
+    let isActive = true;
     const eventSource = new EventSource("/api/coinbase/events");
     const handleSnapshot: EventListener = (event) => {
+      if (!isActive) {
+        return;
+      }
+
       const messageEvent = event as MessageEvent<string>;
-      applyStreamState(JSON.parse(messageEvent.data) as DemoStatePayload);
+      startTransition(() => {
+        setDemoState(JSON.parse(messageEvent.data) as DemoStatePayload);
+      });
       setEventStreamStatus("live");
     };
     const handleUpdate: EventListener = (event) => {
+      if (!isActive) {
+        return;
+      }
+
       const messageEvent = event as MessageEvent<string>;
-      applyStreamState(JSON.parse(messageEvent.data) as DemoStatePayload);
+      startTransition(() => {
+        setDemoState(JSON.parse(messageEvent.data) as DemoStatePayload);
+      });
       setEventStreamStatus("live");
     };
 
@@ -264,9 +283,59 @@ export function CoinbaseDemo({ initialState }: CoinbaseDemoProps) {
     };
 
     return () => {
+      isActive = false;
       eventSource.removeEventListener("snapshot", handleSnapshot);
       eventSource.removeEventListener("update", handleUpdate);
       eventSource.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshOnInterval() {
+      try {
+        const nextState = await fetchDemoStateFromServer();
+
+        if (cancelled) {
+          return;
+        }
+
+        startTransition(() => {
+          setDemoState(nextState);
+        });
+        setEventStreamStatus("live");
+      } catch {
+        if (!cancelled) {
+          setEventStreamStatus("reconnecting");
+        }
+      }
+    }
+
+    void refreshOnInterval();
+
+    const intervalId = window.setInterval(() => {
+      void refreshOnInterval();
+    }, 15000);
+
+    const handleFocus = () => {
+      void refreshOnInterval();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void refreshOnInterval();
+      }
+    };
+
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, []);
 
@@ -319,7 +388,6 @@ export function CoinbaseDemo({ initialState }: CoinbaseDemoProps) {
         throw new Error(errorMessage ?? "Unable to create checkout.");
       }
 
-      setActiveCheckout(data.checkout);
       startTransition(() => {
         setDemoState(data.demoState);
       });
@@ -343,7 +411,7 @@ export function CoinbaseDemo({ initialState }: CoinbaseDemoProps) {
               Coinbase Business API Demo
             </h1>
             <p className="muted-copy mt-4 max-w-2xl text-base leading-8 sm:text-lg">
-              Sandbox and live hosted checkouts with a webhook server feed.
+              Sandbox and live hosted checkouts with live activity syncing.
             </p>
           </div>
 
@@ -352,6 +420,7 @@ export function CoinbaseDemo({ initialState }: CoinbaseDemoProps) {
               {(["sandbox", "live"] as CheckoutEnvironment[]).map((value) => (
                 <button
                   key={value}
+                  aria-pressed={environment === value}
                   className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
                     environment === value
                       ? "bg-[var(--accent-strong)] text-white soft-ring"
@@ -582,14 +651,23 @@ export function CoinbaseDemo({ initialState }: CoinbaseDemoProps) {
             <section className="border-b border-[var(--line)] pb-6">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <p className="eyebrow">Webhook Server Feed</p>
+                  <p className="eyebrow">Activity Feed</p>
                   <h2 className="display-font mt-3 text-2xl font-semibold tracking-[-0.03em]">
                     Events
                   </h2>
                 </div>
-                <span className="rounded-full border border-[var(--line)] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
-                  {eventStreamStatus}
-                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="rounded-full border border-[var(--line)] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)] transition hover:border-[var(--foreground)] hover:text-[var(--foreground)]"
+                    onClick={() => void refreshDemoState()}
+                    type="button"
+                  >
+                    Refresh
+                  </button>
+                  <span className="rounded-full border border-[var(--line)] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+                    {eventStreamStatus}
+                  </span>
+                </div>
               </div>
 
               <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-[var(--ink-soft)]">
@@ -604,7 +682,7 @@ export function CoinbaseDemo({ initialState }: CoinbaseDemoProps) {
               </div>
 
               <div className="mt-5">
-                <EventFeed events={demoState.events} />
+                <EventFeed events={eventsForEnvironment} />
               </div>
             </section>
           </div>

@@ -1,4 +1,7 @@
-import { getDemoState, subscribeToDemoState } from "@/app/lib/demo-store";
+import {
+  subscribeToDemoState,
+  syncRemoteCheckouts,
+} from "@/app/lib/demo-store";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -11,7 +14,7 @@ function encodeEvent(event: string, data: unknown) {
 
 export async function GET(request: Request) {
   const stream = new ReadableStream({
-    start(controller) {
+    async start(controller) {
       let closed = false;
       const heartbeat = setInterval(() => {
         if (!closed) {
@@ -36,7 +39,7 @@ export async function GET(request: Request) {
         controller.close();
       };
 
-      controller.enqueue(encodeEvent("snapshot", getDemoState()));
+      controller.enqueue(encodeEvent("snapshot", await syncRemoteCheckouts()));
       request.signal.addEventListener("abort", close, { once: true });
     },
   });

@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import type {
   CheckoutEnvironment,
   CoinbaseCheckout,
+  CoinbaseCheckoutListResponse,
   DemoStatePayload,
 } from "@/app/lib/coinbase-types";
 
@@ -252,6 +253,30 @@ export async function getCheckout(
     host: COINBASE_BUSINESS_HOST,
     method: "GET",
     path: getCheckoutPath(environment, checkoutId),
+  });
+}
+
+export async function listCheckouts(input: {
+  environment: CheckoutEnvironment;
+  pageSize?: number;
+  pageToken?: string;
+}): Promise<CoinbaseCheckoutListResponse> {
+  const searchParams = new URLSearchParams();
+
+  if (input.pageSize) {
+    searchParams.set("pageSize", String(input.pageSize));
+  }
+
+  if (input.pageToken) {
+    searchParams.set("pageToken", input.pageToken);
+  }
+
+  const query = searchParams.toString();
+
+  return coinbaseFetch<CoinbaseCheckoutListResponse>({
+    host: COINBASE_BUSINESS_HOST,
+    method: "GET",
+    path: `${getCheckoutPath(input.environment)}${query ? `?${query}` : ""}`,
   });
 }
 

@@ -32,6 +32,11 @@ export interface CoinbaseCheckout {
   url: string;
 }
 
+export interface CoinbaseCheckoutListResponse {
+  checkouts: CoinbaseCheckout[];
+  nextPageToken?: string;
+}
+
 export interface DemoEventRecord {
   amount: string;
   checkoutId: string;
