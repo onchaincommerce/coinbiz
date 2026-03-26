@@ -20,6 +20,10 @@ type CreateCheckoutResponse = {
   demoState: DemoStatePayload;
 };
 
+type CreateCheckoutErrorResponse = {
+  error?: string;
+};
+
 type CartItem = {
   caption: string;
   id: string;
@@ -307,10 +311,12 @@ export function CoinbaseDemo({ initialState }: CoinbaseDemoProps) {
 
       const data = (await response.json()) as
         | CreateCheckoutResponse
-        | { error?: string };
+        | CreateCheckoutErrorResponse;
 
       if (!response.ok || !("checkout" in data)) {
-        throw new Error(data.error ?? "Unable to create checkout.");
+        const errorMessage =
+          "error" in data ? data.error : "Unable to create checkout.";
+        throw new Error(errorMessage ?? "Unable to create checkout.");
       }
 
       setActiveCheckout(data.checkout);
