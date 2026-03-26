@@ -2,6 +2,11 @@
 
 import { startTransition, useEffect, useState } from "react";
 
+import {
+  buildStoredReceiptContext,
+  getReceiptCookieName,
+  serializeReceiptContext,
+} from "@/app/lib/receipt-context";
 import type {
   CheckoutEnvironment,
   CoinbaseCheckout,
@@ -132,6 +137,19 @@ function getCartTotal(items: CartItem[]) {
     (total, item) => total + item.unitAmount * Math.max(item.quantity, 0),
     0,
   );
+}
+
+function persistReceiptContext(
+  environment: CheckoutEnvironment,
+  checkout: CoinbaseCheckout,
+) {
+  const secureFlag = window.location.protocol === "https:" ? "; Secure" : "";
+  const cookieName = getReceiptCookieName(environment);
+  const cookieValue = serializeReceiptContext(
+    buildStoredReceiptContext(checkout, environment),
+  );
+
+  document.cookie = `${cookieName}=${cookieValue}; Max-Age=14400; Path=/; SameSite=Lax${secureFlag}`;
 }
 
 async function fetchDemoStateFromServer() {
@@ -359,18 +377,30 @@ export function CoinbaseDemo({ initialState }: CoinbaseDemoProps) {
       setCreating(true);
       setErrorMessage(null);
 
+      const referenceValue = metadata.reference?.trim();
+      const successRedirectUrl = redirectBaseUrl
+        ? `${redirectBaseUrl}/payment-result?${new URLSearchParams({
+            environment,
+            ...(referenceValue ? { reference: referenceValue } : {}),
+            status: "success",
+          }).toString()}`
+        : undefined;
+      const failRedirectUrl = redirectBaseUrl
+        ? `${redirectBaseUrl}/payment-result?${new URLSearchParams({
+            environment,
+            ...(referenceValue ? { reference: referenceValue } : {}),
+            status: "failed",
+          }).toString()}`
+        : undefined;
+
       const response = await fetch("/api/coinbase/checkouts", {
         body: JSON.stringify({
           amount: totalAmount.toFixed(2),
           description: checkoutDescription,
           environment,
-          failRedirectUrl: redirectBaseUrl
-            ? `${redirectBaseUrl}/payment-result?environment=${environment}&status=failed`
-            : undefined,
+          failRedirectUrl,
           metadata,
-          successRedirectUrl: redirectBaseUrl
-            ? `${redirectBaseUrl}/payment-result?environment=${environment}&status=success`
-            : undefined,
+          successRedirectUrl,
         }),
         headers: {
           "Content-Type": "application/json",
@@ -391,6 +421,7 @@ export function CoinbaseDemo({ initialState }: CoinbaseDemoProps) {
       startTransition(() => {
         setDemoState(data.demoState);
       });
+      persistReceiptContext(environment, data.checkout);
       openHostedCheckout(data.checkout.url);
     } catch (error) {
       const message =
