@@ -1,11 +1,10 @@
 import crypto from "node:crypto";
 
-import { sql } from "@vercel/postgres";
-
 import type {
   CheckoutEnvironment,
   CoinbaseCheckout,
 } from "@/app/lib/coinbase-types";
+import { getPostgresSql, isPostgresConfigured } from "@/app/lib/postgres";
 
 type StoreWebhookEventInput = {
   checkout: CoinbaseCheckout;
@@ -24,17 +23,11 @@ type StoreWebhookEventResult =
 
 let setupPromise: Promise<void> | null = null;
 
-function isPostgresConfigured() {
-  return Boolean(
-    process.env.POSTGRES_URL?.trim() ||
-      process.env.POSTGRES_PRISMA_URL?.trim() ||
-      process.env.POSTGRES_URL_NON_POOLING?.trim(),
-  );
-}
-
 async function ensureWebhookEventTable() {
   if (!setupPromise) {
     setupPromise = (async () => {
+      const sql = getPostgresSql();
+
       await sql`
         create table if not exists coinbase_webhook_events (
           id uuid primary key,
@@ -54,7 +47,12 @@ async function ensureWebhookEventTable() {
     })();
   }
 
-  return setupPromise;
+  try {
+    return await setupPromise;
+  } catch (error) {
+    setupPromise = null;
+    throw error;
+  }
 }
 
 export async function storeCoinbaseWebhookEvent({
@@ -74,6 +72,7 @@ export async function storeCoinbaseWebhookEvent({
 
   await ensureWebhookEventTable();
 
+  const sql = getPostgresSql();
   await sql`
     insert into coinbase_webhook_events (
       id,

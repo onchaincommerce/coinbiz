@@ -3,9 +3,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { sql } from "@vercel/postgres";
-
 import type { AgentCheckoutPaymentAttempt } from "@/app/lib/agentic-payment-types";
+import type {
+  CheckoutEnvironment,
+  CoinbaseCheckout,
+} from "@/app/lib/coinbase-types";
+import { getPostgresSql, isPostgresConfigured } from "@/app/lib/postgres";
 
 type AttemptStoreFile = {
   attempts: AgentCheckoutPaymentAttempt[];
@@ -33,17 +36,11 @@ async function ensureStoreDirectory() {
   await fs.mkdir(STORE_DIRECTORY, { recursive: true });
 }
 
-function isPostgresConfigured() {
-  return Boolean(
-    process.env.POSTGRES_URL?.trim() ||
-      process.env.POSTGRES_PRISMA_URL?.trim() ||
-      process.env.POSTGRES_URL_NON_POOLING?.trim(),
-  );
-}
-
 async function ensurePostgresAttemptTable() {
   if (!postgresSetupPromise) {
     postgresSetupPromise = (async () => {
+      const sql = getPostgresSql();
+
       await sql`
         create table if not exists coinbase_agentic_payment_attempts (
           id text primary key,
@@ -60,7 +57,12 @@ async function ensurePostgresAttemptTable() {
     })();
   }
 
-  return postgresSetupPromise;
+  try {
+    return await postgresSetupPromise;
+  } catch (error) {
+    postgresSetupPromise = null;
+    throw error;
+  }
 }
 
 function parseAttemptPayload(payload: unknown): AgentCheckoutPaymentAttempt | null {
@@ -78,13 +80,14 @@ function parseAttemptPayload(payload: unknown): AgentCheckoutPaymentAttempt | nu
 async function readPostgresAttempts() {
   await ensurePostgresAttemptTable();
 
+  const sql = getPostgresSql();
   const result = await sql`
     select payload
     from coinbase_agentic_payment_attempts
     order by updated_at desc
-  `;
+  ` as Array<{ payload: unknown }>;
 
-  return result.rows
+  return result
     .map((row) => parseAttemptPayload(row.payload))
     .filter((attempt): attempt is AgentCheckoutPaymentAttempt => Boolean(attempt));
 }
@@ -92,33 +95,36 @@ async function readPostgresAttempts() {
 async function readPostgresAttemptById(id: string) {
   await ensurePostgresAttemptTable();
 
+  const sql = getPostgresSql();
   const result = await sql`
     select payload
     from coinbase_agentic_payment_attempts
     where id = ${id}
     limit 1
-  `;
+  ` as Array<{ payload: unknown }>;
 
-  return parseAttemptPayload(result.rows[0]?.payload) ?? undefined;
+  return parseAttemptPayload(result[0]?.payload) ?? undefined;
 }
 
 async function readLatestPostgresAttemptByCheckoutId(checkoutId: string) {
   await ensurePostgresAttemptTable();
 
+  const sql = getPostgresSql();
   const result = await sql`
     select payload
     from coinbase_agentic_payment_attempts
     where checkout_id = ${checkoutId}
     order by updated_at desc
     limit 1
-  `;
+  ` as Array<{ payload: unknown }>;
 
-  return parseAttemptPayload(result.rows[0]?.payload) ?? undefined;
+  return parseAttemptPayload(result[0]?.payload) ?? undefined;
 }
 
 async function upsertPostgresAttempt(attempt: AgentCheckoutPaymentAttempt) {
   await ensurePostgresAttemptTable();
 
+  const sql = getPostgresSql();
   const nextAttempt = cloneForStorage(attempt);
   await sql`
     insert into coinbase_agentic_payment_attempts (
@@ -140,6 +146,13 @@ async function upsertPostgresAttempt(attempt: AgentCheckoutPaymentAttempt) {
   `;
 
   return nextAttempt;
+}
+
+function logPostgresFallback(operation: string, error: unknown) {
+  console.error(
+    `Agentic payment ${operation} failed against Postgres; falling back to ephemeral local storage.`,
+    error,
+  );
 }
 
 async function readStoreFile(): Promise<AttemptStoreFile> {
@@ -192,9 +205,18 @@ async function withStoreLock<T>(callback: (store: AttemptStoreFile) => Promise<T
 }
 
 export async function listAgentCheckoutPaymentAttempts() {
-  const attempts = isPostgresConfigured()
-    ? await readPostgresAttempts()
-    : (await readStoreFile()).attempts;
+  let attempts: AgentCheckoutPaymentAttempt[];
+
+  if (isPostgresConfigured()) {
+    try {
+      attempts = await readPostgresAttempts();
+    } catch (error) {
+      logPostgresFallback("list", error);
+      attempts = (await readStoreFile()).attempts;
+    }
+  } else {
+    attempts = (await readStoreFile()).attempts;
+  }
 
   return [...attempts].sort((left, right) => {
     const leftTime = Date.parse(left.updatedAt ?? left.createdAt);
@@ -205,7 +227,11 @@ export async function listAgentCheckoutPaymentAttempts() {
 
 export async function getAgentCheckoutPaymentAttemptById(id: string) {
   if (isPostgresConfigured()) {
-    return readPostgresAttemptById(id);
+    try {
+      return await readPostgresAttemptById(id);
+    } catch (error) {
+      logPostgresFallback("read by id", error);
+    }
   }
 
   const store = await readStoreFile();
@@ -216,7 +242,11 @@ export async function getLatestAgentCheckoutPaymentAttemptByCheckoutId(
   checkoutId: string,
 ) {
   if (isPostgresConfigured()) {
-    return readLatestPostgresAttemptByCheckoutId(checkoutId);
+    try {
+      return await readLatestPostgresAttemptByCheckoutId(checkoutId);
+    } catch (error) {
+      logPostgresFallback("read by checkout id", error);
+    }
   }
 
   const attempts = await listAgentCheckoutPaymentAttempts();
@@ -227,7 +257,11 @@ export async function upsertAgentCheckoutPaymentAttempt(
   attempt: AgentCheckoutPaymentAttempt,
 ) {
   if (isPostgresConfigured()) {
-    return upsertPostgresAttempt(attempt);
+    try {
+      return await upsertPostgresAttempt(attempt);
+    } catch (error) {
+      logPostgresFallback("upsert", error);
+    }
   }
 
   return withStoreLock((store) => {
@@ -241,5 +275,56 @@ export async function upsertAgentCheckoutPaymentAttempt(
     }
 
     return nextAttempt;
+  });
+}
+
+function getCheckoutWebhookStage(
+  checkout: CoinbaseCheckout,
+  existingStage: AgentCheckoutPaymentAttempt["stage"],
+) {
+  const status = checkout.status.toUpperCase();
+
+  if (status === "COMPLETED") {
+    return "completed";
+  }
+
+  if (["CANCELED", "CANCELLED", "EXPIRED", "FAILED"].includes(status)) {
+    return "failed";
+  }
+
+  return existingStage;
+}
+
+export async function recordAgenticCheckoutWebhook(
+  environment: CheckoutEnvironment,
+  checkout: CoinbaseCheckout,
+) {
+  if (environment !== "live") {
+    return null;
+  }
+
+  const existingAttempt = await getLatestAgentCheckoutPaymentAttemptByCheckoutId(
+    checkout.id,
+  );
+
+  if (!existingAttempt) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const stage = getCheckoutWebhookStage(checkout, existingAttempt.stage);
+  const isFailed = stage === "failed";
+
+  return upsertAgentCheckoutPaymentAttempt({
+    ...existingAttempt,
+    errorCode: isFailed ? checkout.status : existingAttempt.errorCode,
+    errorMessage: isFailed
+      ? `Checkout finished in ${checkout.status}.`
+      : existingAttempt.errorMessage,
+    lastReconciledAt: now,
+    rawCheckoutStatus: checkout,
+    stage,
+    txHash: checkout.transactionHash ?? existingAttempt.txHash,
+    updatedAt: now,
   });
 }

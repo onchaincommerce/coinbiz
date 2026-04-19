@@ -10,6 +10,7 @@ import type {
   CoinbaseCheckout,
 } from "@/app/lib/coinbase-types";
 import { getDemoState, recordCheckoutWebhook } from "@/app/lib/demo-store";
+import { recordAgenticCheckoutWebhook } from "@/app/lib/agentic-payment-store";
 import { storeCoinbaseWebhookEvent } from "@/app/lib/webhook-event-store";
 
 export const runtime = "nodejs";
@@ -119,7 +120,18 @@ export async function POST(
 
   recordCheckoutWebhook(environment, checkoutWithEnvironment);
 
+  let agenticAttemptUpdated = false;
+
+  try {
+    agenticAttemptUpdated = Boolean(
+      await recordAgenticCheckoutWebhook(environment, checkoutWithEnvironment),
+    );
+  } catch (error) {
+    console.error("Coinbase webhook attempt update failed", error);
+  }
+
   return NextResponse.json({
+    agenticAttemptUpdated,
     checkoutId: checkout.id,
     demoState: getDemoState(),
     environment,
