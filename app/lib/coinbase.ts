@@ -1,12 +1,18 @@
 import crypto from "node:crypto";
 
 import type {
+  CoinbaseAddressResource,
+  CoinbaseAppAccount,
   CheckoutEnvironment,
   CoinbaseCheckout,
   CoinbaseCheckoutListResponse,
+  CoinbaseExchangeRates,
+  CoinbaseTransaction,
   DemoStatePayload,
+  PushAsset,
 } from "@/app/lib/coinbase-types";
 
+const COINBASE_APP_HOST = "api.coinbase.com";
 const COINBASE_BUSINESS_HOST = "business.coinbase.com";
 const COINBASE_PLATFORM_HOST = "api.cdp.coinbase.com";
 const DEFAULT_WEBHOOK_MAX_AGE_MINUTES = 5;
@@ -36,6 +42,88 @@ export interface CreateCheckoutInput {
   metadata?: Record<string, string>;
   successRedirectUrl?: string;
 }
+
+type CoinbaseAppListResponse<T> = {
+  data: T[];
+};
+
+type CoinbaseAppSingleResponse<T> = {
+  data: T;
+};
+
+type CoinbaseTrackAccountResponse = {
+  allow_deposits?: boolean;
+  allow_withdrawals?: boolean;
+  balance: {
+    amount: string;
+    currency: string;
+  };
+  created_at?: string;
+  currency: {
+    code: string;
+    exponent?: number;
+    name?: string;
+    type?: string;
+  };
+  id: string;
+  name: string;
+  portfolio_id?: string;
+  primary?: boolean;
+  resource_path?: string;
+  type?: string;
+  updated_at?: string;
+};
+
+type CoinbaseExchangeRatesResponse = {
+  data: {
+    currency: string;
+    rates: Record<string, string>;
+  };
+};
+
+type CoinbaseTrackAddressResponse = {
+  address: string;
+  created_at?: string;
+  id: string;
+  name?: string | null;
+  network?: string | null;
+  resource_path?: string;
+  updated_at?: string;
+};
+
+type CoinbaseTrackTransactionResponse = {
+  amount: {
+    amount: string;
+    currency: string;
+  };
+  created_at?: string;
+  from?: {
+    address?: string;
+    id?: string;
+    resource?: string | null;
+    resource_path?: string;
+  };
+  id: string;
+  native_amount?: {
+    amount: string;
+    currency: string;
+  };
+  network?: {
+    hash?: string;
+    network_name?: string;
+    status?: string;
+  };
+  resource_path?: string;
+  status: string;
+  to?: {
+    address?: string;
+    id?: string;
+    resource?: string | null;
+    resource_path?: string;
+  };
+  type: string;
+  updated_at?: string;
+};
 
 type HeaderShape = Headers | Record<string, string | string[] | undefined>;
 
@@ -200,6 +288,21 @@ async function coinbaseFetch<T>({
   return (await response.json()) as T;
 }
 
+async function appFetch<T>({
+  body,
+  idempotencyKey,
+  method,
+  path,
+}: Omit<CoinbaseRequestConfig, "host">): Promise<T> {
+  return coinbaseFetch<T>({
+    body,
+    host: COINBASE_APP_HOST,
+    idempotencyKey,
+    method,
+    path,
+  });
+}
+
 function getCheckoutPath(environment: CheckoutEnvironment, checkoutId?: string) {
   const prefix = environment === "sandbox" ? "/sandbox" : "";
   const idPath = checkoutId ? `/${checkoutId}` : "";
@@ -291,6 +394,151 @@ export async function callPlatformWebhooksApi<T>(
     method,
     path,
   });
+}
+
+function mapTrackAccount(account: CoinbaseTrackAccountResponse): CoinbaseAppAccount {
+  return {
+    allowDeposits: Boolean(account.allow_deposits),
+    allowWithdrawals: Boolean(account.allow_withdrawals),
+    balance: account.balance,
+    createdAt: account.created_at,
+    currency: {
+      code: account.currency.code,
+      exponent: account.currency.exponent ?? 8,
+      name: account.currency.name ?? account.currency.code,
+      type: account.currency.type ?? "crypto",
+    },
+    id: account.id,
+    name: account.name,
+    portfolioId: account.portfolio_id,
+    primary: Boolean(account.primary),
+    resourcePath: account.resource_path,
+    type: account.type ?? "wallet",
+    updatedAt: account.updated_at,
+  };
+}
+
+function mapExchangeRates(
+  response: CoinbaseExchangeRatesResponse,
+): CoinbaseExchangeRates {
+  return {
+    currency: response.data.currency,
+    rates: response.data.rates,
+  };
+}
+
+function mapTrackAddress(
+  address: CoinbaseTrackAddressResponse,
+): CoinbaseAddressResource {
+  return {
+    address: address.address,
+    createdAt: address.created_at,
+    id: address.id,
+    name: address.name,
+    network: address.network,
+    resourcePath: address.resource_path,
+    updatedAt: address.updated_at,
+  };
+}
+
+function mapTrackTransaction(
+  transaction: CoinbaseTrackTransactionResponse,
+): CoinbaseTransaction {
+  return {
+    amount: transaction.amount,
+    createdAt: transaction.created_at,
+    from: transaction.from
+      ? {
+          address: transaction.from.address,
+          id: transaction.from.id,
+          resource: transaction.from.resource,
+          resourcePath: transaction.from.resource_path,
+        }
+      : undefined,
+    id: transaction.id,
+    nativeAmount: transaction.native_amount,
+    network: transaction.network
+      ? {
+          hash: transaction.network.hash,
+          networkName: transaction.network.network_name,
+          status: transaction.network.status,
+        }
+      : undefined,
+    resourcePath: transaction.resource_path,
+    status: transaction.status,
+    to: transaction.to
+      ? {
+          address: transaction.to.address,
+          id: transaction.to.id,
+          resource: transaction.to.resource,
+          resourcePath: transaction.to.resource_path,
+        }
+      : undefined,
+    type: transaction.type,
+    updatedAt: transaction.updated_at,
+  };
+}
+
+export async function listWalletAccounts(): Promise<CoinbaseAppAccount[]> {
+  const response = await appFetch<CoinbaseAppListResponse<CoinbaseTrackAccountResponse>>({
+    method: "GET",
+    path: "/v2/accounts",
+  });
+
+  return response.data.map(mapTrackAccount);
+}
+
+export async function getExchangeRates(currency: PushAsset): Promise<CoinbaseExchangeRates> {
+  const response = await fetch(
+    `https://${COINBASE_APP_HOST}/v2/exchange-rates?currency=${currency}`,
+    { cache: "no-store" },
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Coinbase exchange rates request failed (${response.status}): ${errorText.slice(0, 400)}`,
+    );
+  }
+
+  return mapExchangeRates((await response.json()) as CoinbaseExchangeRatesResponse);
+}
+
+export async function createOnchainAddress(input: {
+  accountId: string;
+  name?: string;
+  network?: string;
+}): Promise<CoinbaseAddressResource> {
+  const payload: JsonValue = {};
+
+  if (input.name) {
+    (payload as Record<string, JsonValue>).name = input.name;
+  }
+
+  if (input.network) {
+    (payload as Record<string, JsonValue>).network = input.network;
+  }
+
+  const response = await appFetch<CoinbaseAppSingleResponse<CoinbaseTrackAddressResponse>>({
+    body: payload,
+    idempotencyKey: crypto.randomUUID(),
+    method: "POST",
+    path: `/v2/accounts/${input.accountId}/addresses`,
+  });
+
+  return mapTrackAddress(response.data);
+}
+
+export async function listAddressTransactions(input: {
+  accountId: string;
+  addressId: string;
+}): Promise<CoinbaseTransaction[]> {
+  const response = await appFetch<CoinbaseAppListResponse<CoinbaseTrackTransactionResponse>>({
+    method: "GET",
+    path: `/v2/accounts/${input.accountId}/addresses/${input.addressId}/transactions`,
+  });
+
+  return response.data.map(mapTrackTransaction);
 }
 
 export function getWebhookSecret(environment: CheckoutEnvironment) {

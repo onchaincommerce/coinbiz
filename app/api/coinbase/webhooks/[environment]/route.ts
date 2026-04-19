@@ -10,6 +10,7 @@ import type {
   CoinbaseCheckout,
 } from "@/app/lib/coinbase-types";
 import { getDemoState, recordCheckoutWebhook } from "@/app/lib/demo-store";
+import { storeCoinbaseWebhookEvent } from "@/app/lib/webhook-event-store";
 
 export const runtime = "nodejs";
 
@@ -80,26 +81,50 @@ export async function POST(
     );
   }
 
+  let parsedPayload: CoinbaseCheckout;
+
   try {
-    const checkout = JSON.parse(payload) as CoinbaseCheckout;
-    const checkoutWithEnvironment = {
-      ...checkout,
-      demoEnvironment: environment,
-    };
-
-    recordCheckoutWebhook(environment, checkoutWithEnvironment);
-
-    return NextResponse.json({
-      checkoutId: checkout.id,
-      demoState: getDemoState(),
-      environment,
-      received: true,
-      status: checkout.status,
-    });
+    parsedPayload = JSON.parse(payload) as CoinbaseCheckout;
   } catch {
     return NextResponse.json(
       { error: "Webhook payload was not valid JSON." },
       { status: 400 },
     );
   }
+
+  const checkout = parsedPayload;
+  const checkoutWithEnvironment = {
+    ...checkout,
+    demoEnvironment: environment,
+  };
+
+  let webhookEventStore: Awaited<
+    ReturnType<typeof storeCoinbaseWebhookEvent>
+  >;
+
+  try {
+    webhookEventStore = await storeCoinbaseWebhookEvent({
+      checkout,
+      environment,
+      payload: parsedPayload,
+    });
+  } catch (error) {
+    console.error("Coinbase webhook persistence failed", error);
+
+    return NextResponse.json(
+      { error: "Unable to persist webhook event." },
+      { status: 500 },
+    );
+  }
+
+  recordCheckoutWebhook(environment, checkoutWithEnvironment);
+
+  return NextResponse.json({
+    checkoutId: checkout.id,
+    demoState: getDemoState(),
+    environment,
+    received: true,
+    status: checkout.status,
+    webhookEventStore,
+  });
 }

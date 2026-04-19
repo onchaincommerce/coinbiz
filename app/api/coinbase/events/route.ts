@@ -16,17 +16,7 @@ export async function GET(request: Request) {
   const stream = new ReadableStream({
     async start(controller) {
       let closed = false;
-      const heartbeat = setInterval(() => {
-        if (!closed) {
-          controller.enqueue(encoder.encode(`: heartbeat ${Date.now()}\n\n`));
-        }
-      }, 15000);
-
-      const unsubscribe = subscribeToDemoState((state) => {
-        if (!closed) {
-          controller.enqueue(encodeEvent("update", state));
-        }
-      });
+      let unsubscribe = () => {};
 
       const close = () => {
         if (closed) {
@@ -36,10 +26,35 @@ export async function GET(request: Request) {
         closed = true;
         clearInterval(heartbeat);
         unsubscribe();
-        controller.close();
+
+        try {
+          controller.close();
+        } catch {
+          // The stream may already be closed by the runtime.
+        }
       };
 
-      controller.enqueue(encodeEvent("snapshot", await syncRemoteCheckouts()));
+      const safeEnqueue = (chunk: Uint8Array) => {
+        if (closed) {
+          return;
+        }
+
+        try {
+          controller.enqueue(chunk);
+        } catch {
+          close();
+        }
+      };
+
+      const heartbeat = setInterval(() => {
+        safeEnqueue(encoder.encode(`: heartbeat ${Date.now()}\n\n`));
+      }, 15000);
+
+      unsubscribe = subscribeToDemoState((state) => {
+        safeEnqueue(encodeEvent("update", state));
+      });
+
+      safeEnqueue(encodeEvent("snapshot", await syncRemoteCheckouts()));
       request.signal.addEventListener("abort", close, { once: true });
     },
   });

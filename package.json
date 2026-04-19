@@ -7,12 +7,18 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
+    "coinbase:headless-pay": "node scripts/coinbase-headless-payment.mjs",
     "coinbase:webhook": "node scripts/coinbase-webhook-subscription.mjs"
   },
   "dependencies": {
+    "@coinbase/cdp-core": "^0.0.100",
+    "@coinbase/cdp-hooks": "^0.0.100",
+    "@coinbase/cdp-react": "^0.0.100",
+    "@vercel/postgres": "^0.10.0",
     "next": "16.2.1",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "viem": "^2.48.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
