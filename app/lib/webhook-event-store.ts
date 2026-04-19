@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import { sql } from "@vercel/postgres";
 
 import type {
@@ -33,10 +35,9 @@ function isPostgresConfigured() {
 async function ensureWebhookEventTable() {
   if (!setupPromise) {
     setupPromise = (async () => {
-      await sql`create extension if not exists pgcrypto`;
       await sql`
         create table if not exists coinbase_webhook_events (
-          id uuid primary key default gen_random_uuid(),
+          id uuid primary key,
           environment text not null check (environment in ('sandbox', 'live')),
           checkout_id text,
           event_type text,
@@ -75,6 +76,7 @@ export async function storeCoinbaseWebhookEvent({
 
   await sql`
     insert into coinbase_webhook_events (
+      id,
       environment,
       checkout_id,
       event_type,
@@ -83,6 +85,7 @@ export async function storeCoinbaseWebhookEvent({
       payload
     )
     values (
+      ${crypto.randomUUID()}::uuid,
       ${environment},
       ${checkout.id ?? null},
       ${checkout.eventType ?? null},
