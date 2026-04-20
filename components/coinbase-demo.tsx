@@ -3,6 +3,15 @@
 import Image from "next/image";
 import dynamic from "next/dynamic";
 import { startTransition, useEffect, useState } from "react";
+import {
+  createPublicClient,
+  erc20Abi,
+  formatEther,
+  formatUnits,
+  http,
+  type Hex,
+} from "viem";
+import { base } from "viem/chains";
 
 import {
   buildStoredReceiptContext,
@@ -50,6 +59,7 @@ type CoinbaseDemoProps = {
 };
 
 type DemoFlow = "hosted" | "embedded" | "headless" | "push";
+type EmbeddedFundingAsset = "USDC" | "ETH";
 type WizardStep = "intro" | "environment" | "flow" | "experience";
 
 type CreateCheckoutResponse = {
@@ -92,17 +102,68 @@ type MetadataField = {
   value: string;
 };
 
+type EmbeddedWalletBalances = {
+  error: string | null;
+  eth: string | null;
+  refreshedAt: string | null;
+  status: "idle" | "loading" | "success" | "error";
+  usdc: string | null;
+};
+
+type EmbeddedSwapQuoteState = {
+  error: string | null;
+  expectedUsdc: string | null;
+  expectedUsdcAtomic: string | null;
+  fromAmountAtomic: string | null;
+  fromAmountEth: string | null;
+  minUsdc: string | null;
+  minUsdcAtomic: string | null;
+  networkFeeEth: string | null;
+  status: "idle" | "loading" | "success" | "error";
+};
+
+type EmbeddedSwapPlan = {
+  expectedUsdc: string;
+  expectedUsdcAtomic: string;
+  fromAmountAtomic: string;
+  fromAmountEth: string;
+  minUsdc: string;
+  minUsdcAtomic: string;
+  networkFeeEth: string | null;
+};
+
+type EmbeddedSwapReceipt = {
+  expectedUsdc: string;
+  fromAmountEth: string;
+  minUsdc: string;
+  status: "submitted" | "confirmed";
+  transactionHash: string | null;
+};
+
 const PUSH_QR_SIZE = 280;
 const BITCOIN_NETWORK: PushNetwork = "bitcoin";
+const BASE_RPC_URL = "https://mainnet.base.org";
+const BASE_USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const EVM_NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
 const ETHEREUM_MAINNET_CHAIN_ID = 1;
 const BASE_MAINNET_CHAIN_ID = 8453;
 const ETHEREUM_NATIVE_DECIMALS = 18;
+const USDC_DECIMALS = 6;
+const EMBEDDED_SWAP_SLIPPAGE_BPS = 100;
+const EMBEDDED_ETH_SWAP_SEED_WEI = BigInt("1000000000000");
+const EMBEDDED_ETH_SWAP_SAFETY_BPS = BigInt(250);
+const EMBEDDED_ETH_SWAP_MAX_QUOTE_ATTEMPTS = 4;
 const TEST_CART: CartItem = {
-  caption: "One low-value $0.01 test payment.",
+  caption: "",
   id: "test-payment",
-  title: "$0.01 test payment",
+  title: "Payment",
   unitAmount: 0.01,
 };
+
+const basePublicClient = createPublicClient({
+  chain: base,
+  transport: http(BASE_RPC_URL),
+});
 
 const environmentLabels: Record<CheckoutEnvironment, string> = {
   live: "Live",
@@ -244,6 +305,200 @@ function decimalToAtomicUnits(value: string, decimals: number) {
   return atomicUnits || "0";
 }
 
+function formatCompactCryptoAmount(value: string | null, symbol: string) {
+  if (!value) {
+    return `- ${symbol}`;
+  }
+
+  const parsed = Number.parseFloat(value);
+
+  if (!Number.isFinite(parsed)) {
+    return `- ${symbol}`;
+  }
+
+  const precision = symbol === "USDC" ? 4 : 6;
+
+  return `${parsed.toLocaleString(undefined, {
+    maximumFractionDigits: precision,
+    minimumFractionDigits: 0,
+  })} ${symbol}`;
+}
+
+function formatAtomicTokenAmount(value: string, decimals: number) {
+  return formatUnits(BigInt(value), decimals);
+}
+
+function createIdleEmbeddedSwapQuote(): EmbeddedSwapQuoteState {
+  return {
+    error: null,
+    expectedUsdc: null,
+    expectedUsdcAtomic: null,
+    fromAmountAtomic: null,
+    fromAmountEth: null,
+    minUsdc: null,
+    minUsdcAtomic: null,
+    networkFeeEth: null,
+    status: "idle",
+  };
+}
+
+function createEmbeddedSwapQuoteError(error: string): EmbeddedSwapQuoteState {
+  return {
+    ...createIdleEmbeddedSwapQuote(),
+    error,
+    status: "error",
+  };
+}
+
+function toEmbeddedSwapQuoteState(plan: EmbeddedSwapPlan): EmbeddedSwapQuoteState {
+  return {
+    error: null,
+    expectedUsdc: plan.expectedUsdc,
+    expectedUsdcAtomic: plan.expectedUsdcAtomic,
+    fromAmountAtomic: plan.fromAmountAtomic,
+    fromAmountEth: plan.fromAmountEth,
+    minUsdc: plan.minUsdc,
+    minUsdcAtomic: plan.minUsdcAtomic,
+    networkFeeEth: plan.networkFeeEth,
+    status: "success",
+  };
+}
+
+function formatNetworkFeeEth(value: string | null) {
+  return value ? formatCompactCryptoAmount(value, "ETH") : "Included in quote";
+}
+
+function hasEnoughQuotedUsdc(
+  quote: EmbeddedSwapQuoteState,
+  targetUsdcAtomic: string,
+) {
+  if (quote.status !== "success" || !quote.minUsdcAtomic) {
+    return false;
+  }
+
+  return BigInt(quote.minUsdcAtomic) >= BigInt(targetUsdcAtomic);
+}
+
+async function fetchEmbeddedWalletBalances(address: `0x${string}`) {
+  const [ethBalance, usdcBalance] = await Promise.all([
+    basePublicClient.getBalance({ address }),
+    basePublicClient.readContract({
+      abi: erc20Abi,
+      address: BASE_USDC_ADDRESS,
+      args: [address],
+      functionName: "balanceOf",
+    }),
+  ]);
+
+  return {
+    eth: formatEther(ethBalance),
+    usdc: formatUnits(usdcBalance, USDC_DECIMALS),
+  };
+}
+
+async function fetchEmbeddedEthSwapQuote(input: {
+  account: `0x${string}`;
+  fromAmountAtomic: bigint;
+}) {
+  const { getSwapPrice } = await import("@coinbase/cdp-core");
+  const quote = await getSwapPrice({
+    account: input.account,
+    fromAmount: input.fromAmountAtomic.toString(),
+    fromToken: EVM_NATIVE_TOKEN_ADDRESS,
+    network: "base",
+    slippageBps: EMBEDDED_SWAP_SLIPPAGE_BPS,
+    toToken: BASE_USDC_ADDRESS,
+  });
+
+  if (!quote.liquidityAvailable) {
+    throw new Error("No Base ETH -> USDC swap route is available right now.");
+  }
+
+  if (quote.issues?.balance) {
+    throw new Error("The embedded wallet does not have enough Base ETH for this swap.");
+  }
+
+  if (quote.issues?.allowance) {
+    throw new Error("Unexpected allowance issue for native ETH swap.");
+  }
+
+  return quote;
+}
+
+function scaleEthInputForTarget(input: {
+  currentFromAmountAtomic: bigint;
+  quotedMinUsdcAtomic: string;
+  targetUsdcAtomic: string;
+}) {
+  const quotedMinUsdcAtomic = BigInt(input.quotedMinUsdcAtomic);
+  const targetUsdcAtomic = BigInt(input.targetUsdcAtomic);
+
+  if (quotedMinUsdcAtomic <= BigInt(0)) {
+    return input.currentFromAmountAtomic * BigInt(2);
+  }
+
+  const baseBps = BigInt(10000);
+  const multiplier = baseBps + EMBEDDED_ETH_SWAP_SAFETY_BPS;
+
+  return (
+    (input.currentFromAmountAtomic * targetUsdcAtomic * multiplier +
+      quotedMinUsdcAtomic * baseBps -
+      BigInt(1)) /
+    (quotedMinUsdcAtomic * baseBps)
+  );
+}
+
+function buildEmbeddedSwapPlan(input: {
+  fromAmountAtomic: bigint;
+  quote: Awaited<ReturnType<typeof fetchEmbeddedEthSwapQuote>>;
+}): EmbeddedSwapPlan {
+  return {
+    expectedUsdc: formatAtomicTokenAmount(input.quote.toAmount, USDC_DECIMALS),
+    expectedUsdcAtomic: input.quote.toAmount,
+    fromAmountAtomic: input.fromAmountAtomic.toString(),
+    fromAmountEth: formatEther(input.fromAmountAtomic),
+    minUsdc: formatAtomicTokenAmount(input.quote.minToAmount, USDC_DECIMALS),
+    minUsdcAtomic: input.quote.minToAmount,
+    networkFeeEth: input.quote.totalNetworkFee
+      ? formatEther(BigInt(input.quote.totalNetworkFee))
+      : null,
+  };
+}
+
+async function createEmbeddedEthSwapPlan(input: {
+  account: `0x${string}`;
+  targetUsdcAtomic: string;
+}) {
+  let fromAmountAtomic = EMBEDDED_ETH_SWAP_SEED_WEI;
+
+  for (
+    let attempt = 0;
+    attempt < EMBEDDED_ETH_SWAP_MAX_QUOTE_ATTEMPTS;
+    attempt += 1
+  ) {
+    const quote = await fetchEmbeddedEthSwapQuote({
+      account: input.account,
+      fromAmountAtomic,
+    });
+    const plan = buildEmbeddedSwapPlan({
+      fromAmountAtomic,
+      quote,
+    });
+
+    if (BigInt(plan.minUsdcAtomic) >= BigInt(input.targetUsdcAtomic)) {
+      return plan;
+    }
+
+    fromAmountAtomic = scaleEthInputForTarget({
+      currentFromAmountAtomic: fromAmountAtomic,
+      quotedMinUsdcAtomic: plan.minUsdcAtomic,
+      targetUsdcAtomic: input.targetUsdcAtomic,
+    });
+  }
+
+  throw new Error("Unable to calculate enough Base ETH to cover the $0.01 checkout.");
+}
+
 function buildPushPaymentUri(pushCharge: PushChargeView) {
   if (pushCharge.asset === "BTC") {
     const searchParams = new URLSearchParams({
@@ -325,11 +580,16 @@ async function fetchPushChargeFromServer(token: string) {
   return data.charge;
 }
 
-function buildCheckoutMetadata(flow: DemoFlow, customMetadata: Record<string, string>) {
+function buildCheckoutMetadata(
+  flow: DemoFlow,
+  customMetadata: Record<string, string>,
+  automaticMetadata: Record<string, string> = {},
+) {
   return {
     amount: TEST_CART.unitAmount.toFixed(2),
     cart: TEST_CART.id,
     flow,
+    ...automaticMetadata,
     reference: customMetadata.reference ?? `coinbiz-${Date.now()}`,
     ...customMetadata,
   };
@@ -655,6 +915,179 @@ function MetadataFieldsEditor({
   );
 }
 
+function EmbeddedFundingControls({
+  balances,
+  fundingAsset,
+  isReady,
+  onFundingAssetChange,
+  onRefreshBalances,
+  paymentAmountAtomicUsdc,
+  paymentPhase,
+  quote,
+  swapReceipt,
+}: {
+  balances: EmbeddedWalletBalances;
+  fundingAsset: EmbeddedFundingAsset;
+  isReady: boolean;
+  onFundingAssetChange: (asset: EmbeddedFundingAsset) => void;
+  onRefreshBalances: () => void;
+  paymentAmountAtomicUsdc: string;
+  paymentPhase: string | null;
+  quote: EmbeddedSwapQuoteState;
+  swapReceipt: EmbeddedSwapReceipt | null;
+}) {
+  const quoteCoversPayment = hasEnoughQuotedUsdc(quote, paymentAmountAtomicUsdc);
+  const swapTxUrl = swapReceipt?.transactionHash
+    ? getNetworkExplorerUrl("base", swapReceipt.transactionHash)
+    : undefined;
+
+  return (
+    <div className="mt-6 space-y-4 rounded-[1.5rem] border border-[var(--line)] bg-white px-4 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-[var(--foreground)]">
+            Embedded wallet funding
+          </p>
+        </div>
+        <button
+          className="rounded-full border border-[var(--line)] bg-white px-4 py-2 text-sm font-semibold text-[var(--foreground)] transition hover:border-[var(--accent-strong)] hover:shadow-[0_10px_30px_rgba(54,103,255,0.14)] disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={!isReady || balances.status === "loading"}
+          onClick={onRefreshBalances}
+          type="button"
+        >
+          {balances.status === "loading" ? "Refreshing..." : "Refresh balances"}
+        </button>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="rounded-[1.25rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-3">
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+            Base ETH
+          </p>
+          <p className="mt-2 text-lg font-semibold text-[var(--foreground)]">
+            {formatCompactCryptoAmount(balances.eth, "ETH")}
+          </p>
+        </div>
+        <div className="rounded-[1.25rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-3">
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+            Base USDC
+          </p>
+          <p className="mt-2 text-lg font-semibold text-[var(--foreground)]">
+            {formatCompactCryptoAmount(balances.usdc, "USDC")}
+          </p>
+        </div>
+      </div>
+
+      {balances.error ? (
+        <div className="rounded-[1.25rem] border border-[#efc8c3] bg-[#fbefed] px-4 py-3 text-sm text-[#8f352d]">
+          {balances.error}
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap gap-3">
+        {(["USDC", "ETH"] as EmbeddedFundingAsset[]).map((asset) => (
+          <button
+            key={asset}
+            className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${
+              fundingAsset === asset
+                ? "border-[var(--accent-strong)] bg-[var(--accent-strong)] text-white shadow-[0_10px_35px_rgba(54,103,255,0.24)]"
+                : "border-[var(--line)] bg-white text-[var(--foreground)] hover:border-[var(--accent-strong)] hover:shadow-[0_10px_30px_rgba(54,103,255,0.14)]"
+            }`}
+            onClick={() => onFundingAssetChange(asset)}
+            type="button"
+          >
+            {asset === "ETH" ? "ETH on Base" : "USDC on Base"}
+          </button>
+        ))}
+      </div>
+
+      {fundingAsset === "ETH" ? (
+        <div className="space-y-3 rounded-[1.25rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-4">
+          <div className="grid gap-3 sm:grid-cols-4">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+                ETH needed
+              </p>
+              <p className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+                {formatCompactCryptoAmount(quote.fromAmountEth, "ETH")}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+                Expected USDC
+              </p>
+              <p className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+                {formatCompactCryptoAmount(quote.expectedUsdc, "USDC")}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+                Minimum
+              </p>
+              <p className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+                {formatCompactCryptoAmount(quote.minUsdc, "USDC")}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+                Network fee
+              </p>
+              <p className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+                {formatNetworkFeeEth(quote.networkFeeEth)}
+              </p>
+            </div>
+          </div>
+
+          {quote.status === "loading" ? (
+            <p className="text-sm text-[var(--ink-soft)]">
+              Calculating the ETH amount needed to pay $0.01 USDC...
+            </p>
+          ) : null}
+
+          {quote.status === "success" && !quoteCoversPayment ? (
+            <div className="rounded-[1rem] border border-[#efc8c3] bg-[#fbefed] px-4 py-3 text-sm text-[#8f352d]">
+              The automatic quote did not cover the $0.01 checkout. Refresh
+              balances and try again.
+            </div>
+          ) : null}
+
+          {quote.error ? (
+            <div className="rounded-[1rem] border border-[#efc8c3] bg-[#fbefed] px-4 py-3 text-sm text-[#8f352d]">
+              {quote.error}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {paymentPhase ? (
+        <div className="rounded-[1.25rem] border border-[#c8d7ff] bg-[#eef4ff] px-4 py-3 text-sm font-semibold text-[#345ecc]">
+          {paymentPhase}
+        </div>
+      ) : null}
+
+      {swapReceipt ? (
+        <div className="divide-y divide-[var(--line)] rounded-[1.25rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-2">
+          <ReceiptField label="Swap status" value={formatStatusLabel(swapReceipt.status)} />
+          <ReceiptField
+            label="Swap tx"
+            mono
+            href={swapTxUrl}
+            value={swapReceipt.transactionHash ?? "Pending"}
+          />
+          <ReceiptField
+            label="ETH swapped"
+            value={`${swapReceipt.fromAmountEth} ETH`}
+          />
+          <ReceiptField
+            label="Minimum USDC"
+            value={`${swapReceipt.minUsdc} USDC`}
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function HeadlessExecutionLog({
   attempt,
   checkout,
@@ -792,6 +1225,33 @@ export function CoinbaseDemo({
     });
   const [embeddedWalletAttempt, setEmbeddedWalletAttempt] =
     useState<AgentCheckoutPaymentAttempt | null>(null);
+  const [embeddedFundingAsset, setEmbeddedFundingAsset] =
+    useState<EmbeddedFundingAsset>("USDC");
+  const [embeddedPaymentPhase, setEmbeddedPaymentPhase] = useState<string | null>(
+    null,
+  );
+  const [embeddedSwapQuote, setEmbeddedSwapQuote] =
+    useState<EmbeddedSwapQuoteState>({
+      error: null,
+      expectedUsdc: null,
+      expectedUsdcAtomic: null,
+      fromAmountAtomic: null,
+      fromAmountEth: null,
+      minUsdc: null,
+      minUsdcAtomic: null,
+      networkFeeEth: null,
+      status: "idle",
+    });
+  const [embeddedSwapReceipt, setEmbeddedSwapReceipt] =
+    useState<EmbeddedSwapReceipt | null>(null);
+  const [embeddedWalletBalances, setEmbeddedWalletBalances] =
+    useState<EmbeddedWalletBalances>({
+      error: null,
+      eth: null,
+      refreshedAt: null,
+      status: "idle",
+      usdc: null,
+    });
   const [trackedEmbeddedWalletCheckoutId, setTrackedEmbeddedWalletCheckoutId] =
     useState<string | null>(null);
   const [headlessAttempt, setHeadlessAttempt] =
@@ -804,10 +1264,17 @@ export function CoinbaseDemo({
   const [demoState, setDemoState] = useState(initialState);
 
   const totalAmount = TEST_CART.unitAmount;
+  const totalAmountAtomicUsdc = decimalToAtomicUnits(
+    totalAmount.toFixed(2),
+    USDC_DECIMALS,
+  );
   const embeddedWalletReady =
     embeddedWalletSession.isInitialized &&
     embeddedWalletSession.isSignedIn &&
     Boolean(embeddedWalletSession.evmAddress);
+  const embeddedEthSwapReady =
+    embeddedFundingAsset !== "ETH" ||
+    hasEnoughQuotedUsdc(embeddedSwapQuote, totalAmountAtomicUsdc);
   const selectedFlowTitle = selectedFlow ? flowLabels[selectedFlow] : null;
   const liveCheckouts = demoState.checkouts.filter(
     (checkout) => checkout.demoEnvironment === environment,
@@ -903,6 +1370,154 @@ export function CoinbaseDemo({
       );
     };
   }, []);
+
+  async function refreshEmbeddedWalletBalances() {
+    if (!embeddedWalletSession.evmAddress) {
+      setEmbeddedWalletBalances({
+        error: null,
+        eth: null,
+        refreshedAt: null,
+        status: "idle",
+        usdc: null,
+      });
+      return;
+    }
+
+    const address = embeddedWalletSession.evmAddress as `0x${string}`;
+
+    setEmbeddedWalletBalances((currentBalances) => ({
+      ...currentBalances,
+      error: null,
+      status: "loading",
+    }));
+
+    try {
+      const balances = await fetchEmbeddedWalletBalances(address);
+      setEmbeddedWalletBalances({
+        error: null,
+        eth: balances.eth,
+        refreshedAt: new Date().toISOString(),
+        status: "success",
+        usdc: balances.usdc,
+      });
+    } catch (error) {
+      setEmbeddedWalletBalances((currentBalances) => ({
+        ...currentBalances,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Unable to load embedded wallet balances.",
+        status: "error",
+      }));
+    }
+  }
+
+  useEffect(() => {
+    if (selectedFlow !== "embedded" || !embeddedWalletSession.evmAddress) {
+      return;
+    }
+
+    let cancelled = false;
+    const address = embeddedWalletSession.evmAddress as `0x${string}`;
+
+    setEmbeddedWalletBalances((currentBalances) => ({
+      ...currentBalances,
+      error: null,
+      status: "loading",
+    }));
+
+    fetchEmbeddedWalletBalances(address)
+      .then((balances) => {
+        if (cancelled) {
+          return;
+        }
+
+        setEmbeddedWalletBalances({
+          error: null,
+          eth: balances.eth,
+          refreshedAt: new Date().toISOString(),
+          status: "success",
+          usdc: balances.usdc,
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        setEmbeddedWalletBalances((currentBalances) => ({
+          ...currentBalances,
+          error:
+            error instanceof Error
+              ? error.message
+              : "Unable to load embedded wallet balances.",
+          status: "error",
+        }));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [embeddedWalletSession.evmAddress, selectedFlow]);
+
+  useEffect(() => {
+    if (
+      selectedFlow !== "embedded" ||
+      embeddedFundingAsset !== "ETH" ||
+      !embeddedWalletReady ||
+      !embeddedWalletSession.evmAddress
+    ) {
+      setEmbeddedSwapQuote(createIdleEmbeddedSwapQuote());
+      return;
+    }
+
+    let cancelled = false;
+    const address = embeddedWalletSession.evmAddress as `0x${string}`;
+
+    setEmbeddedSwapQuote((currentQuote) => ({
+      ...currentQuote,
+      error: null,
+      status: "loading",
+    }));
+
+    const timeoutId = window.setTimeout(() => {
+      createEmbeddedEthSwapPlan({
+        account: address,
+        targetUsdcAtomic: totalAmountAtomicUsdc,
+      })
+        .then((plan) => {
+          if (cancelled) {
+            return;
+          }
+
+          setEmbeddedSwapQuote(toEmbeddedSwapQuoteState(plan));
+        })
+        .catch((error) => {
+          if (cancelled) {
+            return;
+          }
+
+          setEmbeddedSwapQuote(
+            createEmbeddedSwapQuoteError(
+              error instanceof Error
+                ? error.message
+                : "Unable to quote Base ETH -> USDC swap.",
+            ),
+          );
+        });
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    embeddedFundingAsset,
+    embeddedWalletReady,
+    embeddedWalletSession.evmAddress,
+    selectedFlow,
+    totalAmountAtomicUsdc,
+  ]);
 
   useEffect(() => {
     if (!trackedHostedCheckoutId) {
@@ -1093,9 +1708,12 @@ export function CoinbaseDemo({
     };
   }, [pushCharge?.status, pushToken]);
 
-  function prepareMetadata(flow: DemoFlow) {
+  function prepareMetadata(
+    flow: DemoFlow,
+    automaticMetadata: Record<string, string> = {},
+  ) {
     const customMetadata = buildCustomMetadata(metadataFields);
-    const metadata = buildCheckoutMetadata(flow, customMetadata);
+    const metadata = buildCheckoutMetadata(flow, customMetadata, automaticMetadata);
     setSubmittedMetadata(metadata);
 
     return {
@@ -1104,8 +1722,11 @@ export function CoinbaseDemo({
     };
   }
 
-  async function createOfficialCheckoutForFlow(flow: DemoFlow) {
-    const { metadata } = prepareMetadata(flow);
+  async function createOfficialCheckoutForFlow(
+    flow: DemoFlow,
+    automaticMetadata: Record<string, string> = {},
+  ) {
+    const { metadata } = prepareMetadata(flow, automaticMetadata);
     const response = await fetch("/api/coinbase/checkouts", {
       body: JSON.stringify({
         amount: totalAmount.toFixed(2),
@@ -1169,11 +1790,43 @@ export function CoinbaseDemo({
       setCheckoutCreating(true);
       resetMessages();
       setEmbeddedWalletAttempt(null);
+      setEmbeddedPaymentPhase(null);
+      setEmbeddedSwapReceipt(null);
       setHeadlessAttempt(null);
 
       const payerAddress = embeddedWalletSession.evmAddress as `0x${string}`;
-      const checkout = await createOfficialCheckoutForFlow("embedded");
+      let embeddedSwapPlan: EmbeddedSwapPlan | null = null;
+
+      if (embeddedFundingAsset === "ETH") {
+        setEmbeddedPaymentPhase("Calculating Base ETH needed for $0.01 USDC...");
+        embeddedSwapPlan = await createEmbeddedEthSwapPlan({
+          account: payerAddress,
+          targetUsdcAtomic: totalAmountAtomicUsdc,
+        });
+        setEmbeddedSwapQuote(toEmbeddedSwapQuoteState(embeddedSwapPlan));
+      }
+
+      const fundingMetadata: Record<string, string> =
+        embeddedFundingAsset === "ETH"
+          ? {
+              fundingAsset: "ETH",
+              fundingNetwork: "base",
+              fundingRoute: "swap-to-usdc",
+              swapExpectedUsdc: embeddedSwapPlan?.expectedUsdc ?? "pending",
+              swapFromAmountEth: embeddedSwapPlan?.fromAmountEth ?? "pending",
+              swapMinUsdc: embeddedSwapPlan?.minUsdc ?? "pending",
+            }
+          : {
+              fundingAsset: "USDC",
+              fundingNetwork: "base",
+              fundingRoute: "direct-usdc",
+            };
+      const checkout = await createOfficialCheckoutForFlow(
+        "embedded",
+        fundingMetadata,
+      );
       setTrackedEmbeddedWalletCheckoutId(checkout.id);
+      setEmbeddedPaymentPhase("Checkout created. Resolving payment payload...");
 
       const resolutionResponse = await fetch("/api/coinbase/agentic-payments", {
         body: JSON.stringify({
@@ -1200,6 +1853,62 @@ export function CoinbaseDemo({
         throw new Error("Resolver did not return a valid authorization payload.");
       }
 
+      if (embeddedFundingAsset === "ETH") {
+        const swapPlan =
+          embeddedSwapPlan ??
+          (await createEmbeddedEthSwapPlan({
+            account: payerAddress,
+            targetUsdcAtomic: totalAmountAtomicUsdc,
+          }));
+
+        setEmbeddedPaymentPhase("Submitting swap transaction...");
+        const { executeSwap } = await import("@coinbase/cdp-core");
+        const swapResult = await executeSwap({
+          account: payerAddress,
+          fromAmount: swapPlan.fromAmountAtomic,
+          fromToken: EVM_NATIVE_TOKEN_ADDRESS,
+          idempotencyKey: `coinbiz-${checkout.id}-eth-usdc`,
+          network: "base",
+          slippageBps: EMBEDDED_SWAP_SLIPPAGE_BPS,
+          toToken: BASE_USDC_ADDRESS,
+        });
+
+        if (swapResult.type !== "evm-eoa") {
+          throw new Error(
+            "Smart-account swap submission is not enabled for this demo yet.",
+          );
+        }
+
+        setEmbeddedSwapReceipt({
+          expectedUsdc: formatAtomicTokenAmount(swapResult.toAmount, USDC_DECIMALS),
+          fromAmountEth: swapPlan.fromAmountEth,
+          minUsdc: formatAtomicTokenAmount(swapResult.minToAmount, USDC_DECIMALS),
+          status: "submitted",
+          transactionHash: swapResult.transactionHash,
+        });
+
+        setEmbeddedPaymentPhase("Waiting for swap confirmation...");
+        const swapReceipt = await basePublicClient.waitForTransactionReceipt({
+          hash: swapResult.transactionHash as Hex,
+        });
+
+        if (swapReceipt.status !== "success") {
+          throw new Error("ETH -> USDC swap transaction did not complete.");
+        }
+
+        setEmbeddedSwapReceipt({
+          expectedUsdc: formatAtomicTokenAmount(swapResult.toAmount, USDC_DECIMALS),
+          fromAmountEth: swapPlan.fromAmountEth,
+          minUsdc: formatAtomicTokenAmount(swapResult.minToAmount, USDC_DECIMALS),
+          status: "confirmed",
+          transactionHash: swapResult.transactionHash,
+        });
+        setEmbeddedPaymentPhase("Swap confirmed. Signing payment authorization...");
+        void refreshEmbeddedWalletBalances();
+      } else {
+        setEmbeddedPaymentPhase("Signing payment authorization...");
+      }
+
       const { signEvmTypedData } = await import("@coinbase/cdp-core");
       const signedResult = await signEvmTypedData({
         evmAccount: payerAddress,
@@ -1209,6 +1918,7 @@ export function CoinbaseDemo({
         ),
       });
 
+      setEmbeddedPaymentPhase("Submitting payment to Coinbase...");
       const submissionResponse = await fetch("/api/coinbase/agentic-payments", {
         body: JSON.stringify({
           checkoutId: checkout.id,
@@ -1233,10 +1943,13 @@ export function CoinbaseDemo({
       if (submissionData.attempt) {
         setEmbeddedWalletAttempt(submissionData.attempt);
       }
+      setEmbeddedPaymentPhase("Payment submitted. Waiting for receipt...");
+      void refreshEmbeddedWalletBalances();
     } catch (error) {
       setCheckoutErrorMessage(
         error instanceof Error ? error.message : "Unable to submit payment.",
       );
+      setEmbeddedPaymentPhase(null);
     } finally {
       setCheckoutCreating(false);
     }
@@ -1428,6 +2141,8 @@ export function CoinbaseDemo({
     headlessCreating ||
     pushCreating ||
     (selectedFlow === "embedded" && !embeddedWalletReady);
+  const selectedActionDisabled =
+    actionDisabled || (selectedFlow === "embedded" && !embeddedEthSwapReady);
 
   const actionLabel =
     selectedFlow === "hosted"
@@ -1436,9 +2151,13 @@ export function CoinbaseDemo({
         : "Create hosted checkout"
       : selectedFlow === "embedded"
         ? checkoutCreating
-          ? "Submitting..."
+          ? embeddedFundingAsset === "ETH"
+            ? "Swapping & paying..."
+            : "Submitting..."
           : embeddedWalletReady
-            ? "Pay $0.01 with embedded wallet"
+            ? embeddedFundingAsset === "ETH"
+              ? "Swap ETH & pay $0.01"
+              : "Pay $0.01 with embedded wallet"
             : "Sign in to continue"
         : selectedFlow === "headless"
           ? headlessCreating
@@ -1447,6 +2166,7 @@ export function CoinbaseDemo({
           : pushCreating
             ? "Generating..."
             : "Create push payment";
+  const receiptCard = renderReceiptCard();
 
   function renderReceiptCard() {
     if (selectedFlow === "hosted") {
@@ -1536,11 +2256,7 @@ export function CoinbaseDemo({
 
     if (selectedFlow === "embedded" || selectedFlow === "headless") {
       if (!selectedAttempt) {
-        return (
-          <p className="text-sm leading-7 text-[var(--ink-soft)]">
-            Submit the payment and the receipt will appear here.
-          </p>
-        );
+        return null;
       }
 
       const isCompleted = selectedAttempt.stage === "completed";
@@ -1578,10 +2294,31 @@ export function CoinbaseDemo({
             <ReceiptField label="Reference" value={getReference(receiptMetadata)} />
             <ReceiptField label="Checkout ID" mono value={selectedAttempt.checkoutId} />
             {selectedFlow === "embedded" ? (
-              <ReceiptField
-                label="Email"
-                value={embeddedWalletSession.email ?? "Authenticated"}
-              />
+              <>
+                <ReceiptField
+                  label="Email"
+                  value={embeddedWalletSession.email ?? "Authenticated"}
+                />
+                <ReceiptField
+                  label="Funding"
+                  value={
+                    embeddedFundingAsset === "ETH"
+                      ? "Base ETH swapped to USDC"
+                      : "Base USDC"
+                  }
+                />
+                {embeddedSwapReceipt?.transactionHash ? (
+                  <ReceiptField
+                    href={getNetworkExplorerUrl(
+                      "base",
+                      embeddedSwapReceipt.transactionHash,
+                    )}
+                    label="Swap tx"
+                    mono
+                    value={embeddedSwapReceipt.transactionHash}
+                  />
+                ) : null}
+              </>
             ) : (
               <ReceiptField
                 label="Server signer"
@@ -1879,15 +2616,15 @@ export function CoinbaseDemo({
                   <h2 className="display-font text-3xl font-semibold tracking-[-0.04em]">
                     $0.01 test payment
                   </h2>
-                  <p className="text-sm leading-7 text-[var(--ink-soft)]">
-                    {selectedFlow === "hosted"
-                      ? "Create the hosted checkout and open it when you are ready."
-                      : selectedFlow === "embedded"
-                        ? "Authorize and complete the payment with the embedded wallet."
+                  {selectedFlow === "embedded" ? null : (
+                    <p className="text-sm leading-7 text-[var(--ink-soft)]">
+                      {selectedFlow === "hosted"
+                        ? "Create the hosted checkout and open it when you are ready."
                         : selectedFlow === "headless"
                           ? "Let the server signer handle the payment with no browser wallet handoff."
                           : "Generate a direct BTC or ETH payment request for the same amount."}
-                  </p>
+                    </p>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap gap-2">
@@ -1941,15 +2678,35 @@ export function CoinbaseDemo({
                 </div>
               ) : null}
 
+              {selectedFlow === "embedded" ? (
+                <EmbeddedFundingControls
+                  balances={embeddedWalletBalances}
+                  fundingAsset={embeddedFundingAsset}
+                  isReady={embeddedWalletReady}
+                  onFundingAssetChange={(asset) => {
+                    setEmbeddedFundingAsset(asset);
+                    setEmbeddedPaymentPhase(null);
+                    setEmbeddedSwapReceipt(null);
+                  }}
+                  onRefreshBalances={() => void refreshEmbeddedWalletBalances()}
+                  paymentAmountAtomicUsdc={totalAmountAtomicUsdc}
+                  paymentPhase={embeddedPaymentPhase}
+                  quote={embeddedSwapQuote}
+                  swapReceipt={embeddedSwapReceipt}
+                />
+              ) : null}
+
               <div className="mt-6 rounded-[1.5rem] border border-[var(--line)] bg-[#f7f9ff] px-5 py-5">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <p className="text-sm font-semibold text-[var(--foreground)]">
                       {TEST_CART.title}
                     </p>
-                    <p className="mt-1 text-sm text-[var(--ink-soft)]">
-                      {TEST_CART.caption}
-                    </p>
+                    {TEST_CART.caption ? (
+                      <p className="mt-1 text-sm text-[var(--ink-soft)]">
+                        {TEST_CART.caption}
+                      </p>
+                    ) : null}
                   </div>
                   <p className="text-lg font-semibold text-[var(--foreground)]">
                     {formatAmount(TEST_CART.unitAmount)}
@@ -1976,7 +2733,7 @@ export function CoinbaseDemo({
 
                 <button
                   className="rounded-full bg-[var(--accent-strong)] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent)] hover:shadow-[0_14px_44px_rgba(54,103,255,0.28)] disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={actionDisabled}
+                  disabled={selectedActionDisabled}
                   onClick={() => void handleSelectedFlowAction()}
                   type="button"
                 >
@@ -1991,9 +2748,11 @@ export function CoinbaseDemo({
               ) : null}
             </div>
 
-            <div className="rounded-[2rem] border border-[var(--line)] bg-white/86 p-6 shadow-[0_18px_50px_rgba(54,103,255,0.12)]">
-              {renderReceiptCard()}
-            </div>
+            {receiptCard ? (
+              <div className="rounded-[2rem] border border-[var(--line)] bg-white/86 p-6 shadow-[0_18px_50px_rgba(54,103,255,0.12)]">
+                {receiptCard}
+              </div>
+            ) : null}
           </div>
         </section>
       ) : null}

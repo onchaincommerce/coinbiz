@@ -376,6 +376,10 @@ function EmbeddedWalletPanelInner({
 
   if (!isInitialized) {
     if (initTimedOut) {
+      if (variant === "compact") {
+        return null;
+      }
+
       return (
         <EmbeddedWalletErrorCard
           config={config}
@@ -383,6 +387,15 @@ function EmbeddedWalletPanelInner({
           origin={origin}
           variant={variant}
         />
+      );
+    }
+
+    if (variant === "compact") {
+      return (
+        <div className="space-y-3">
+          <div className="h-5 w-28 animate-pulse rounded-full bg-white/60" />
+          <div className="h-12 animate-pulse rounded-[1.25rem] bg-white/60" />
+        </div>
       );
     }
 
@@ -435,11 +448,12 @@ function EmbeddedWalletPanelInner({
             ? "Sign in to pay"
             : "Email OTP inside your brand shell"}
         </h2>
-        <p className={bodyClassName}>
-          {variant === "compact"
-            ? "Use email OTP to unlock the embedded wallet for this payment."
-            : "This pane uses Coinbase Embedded Wallets. No extension, no redirect, no hosted checkout handoff."}
-        </p>
+        {variant === "compact" ? null : (
+          <p className={bodyClassName}>
+            This pane uses Coinbase Embedded Wallets. No extension, no redirect,
+            no hosted checkout handoff.
+          </p>
+        )}
       </div>
 
       {!isSignedIn ? (
@@ -547,7 +561,6 @@ function EmbeddedWalletPanelInner({
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-3">
-                  <span className={successBadgeClassName}>Signed in</span>
                   <button
                     className={secondaryButtonClassName}
                     disabled={isSubmitting}
