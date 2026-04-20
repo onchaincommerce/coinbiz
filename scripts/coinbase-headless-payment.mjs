@@ -1,6 +1,61 @@
 #!/usr/bin/env node
 
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import process from "node:process";
+
+function loadLocalEnvFile(filePath) {
+  if (!existsSync(filePath)) {
+    return;
+  }
+
+  const contents = readFileSync(filePath, "utf8");
+
+  for (const rawLine of contents.split(/\r?\n/)) {
+    const line = rawLine.trim();
+
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+
+    const equalsIndex = line.indexOf("=");
+
+    if (equalsIndex <= 0) {
+      continue;
+    }
+
+    const key = line
+      .slice(0, equalsIndex)
+      .trim()
+      .replace(/^export\s+/, "");
+    let value = line.slice(equalsIndex + 1).trim();
+
+    if (!key || process.env[key]?.trim()) {
+      continue;
+    }
+
+    const first = value.at(0);
+    const last = value.at(-1);
+
+    if (
+      value.length >= 2 &&
+      ((first === "\"" && last === "\"") || (first === "'" && last === "'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    process.env[key] = value;
+  }
+}
+
+function loadLocalEnv() {
+  const cwd = process.cwd();
+
+  loadLocalEnvFile(resolve(cwd, ".env"));
+  loadLocalEnvFile(resolve(cwd, ".env.local"));
+}
+
+loadLocalEnv();
 
 function printUsage() {
   console.log(`Usage:
@@ -19,9 +74,11 @@ Options:
   --max-poll-attempts <n>    Override server-side agentic payment polling attempts.
   --poll-interval-ms <n>     Override server-side agentic payment poll interval.
   --retry-failed             Retry a previously failed payment attempt.
+  --check-env                Verify local headless env without creating or paying.
   --help                     Show this help text.
 
 Environment:
+  The script auto-loads .env and .env.local from the repo root.
   HEADLESS_PAYMENT_INTERNAL_TOKEN must be set for live server-signer execution.
 
 Examples:
@@ -45,6 +102,7 @@ function parseArgs(argv) {
     retryFailed: false,
     skipDryRun: false,
     waitForCompletion: true,
+    checkEnv: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -95,6 +153,9 @@ function parseArgs(argv) {
       case "--retry-failed":
         options.retryFailed = true;
         break;
+      case "--check-env":
+        options.checkEnv = true;
+        break;
       case "--help":
         printUsage();
         process.exit(0);
@@ -105,6 +166,33 @@ function parseArgs(argv) {
   }
 
   return options;
+}
+
+function checkEnv() {
+  const required = [
+    "HEADLESS_PAYMENT_INTERNAL_TOKEN",
+    "HEADLESS_CHECKOUT_PAYER_ENABLED",
+    "HEADLESS_CHECKOUT_PAYER_MAX_USDC",
+    "HEADLESS_CHECKOUT_PAYER_PRIVATE_KEY",
+  ];
+
+  logSection("Local Headless Environment");
+
+  let missingCount = 0;
+
+  for (const key of required) {
+    const value = process.env[key]?.trim();
+
+    if (!value) {
+      missingCount += 1;
+    }
+
+    logKeyValue(key, value ? `configured (${value.length} chars)` : "missing");
+  }
+
+  if (missingCount > 0) {
+    process.exitCode = 1;
+  }
 }
 
 function buildHeaders(body, requireInternalAuth = false) {
@@ -178,6 +266,12 @@ function isValidAmount(value) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+
+  if (options.checkEnv) {
+    checkEnv();
+    return;
+  }
+
   const baseUrl = normalizeBaseUrl(assertOption("--base-url", options.baseUrl));
 
   if (!["live", "sandbox"].includes(options.environment)) {
