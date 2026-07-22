@@ -1,8 +1,14 @@
 "use client";
 
-import Image from "next/image";
 import dynamic from "next/dynamic";
-import { startTransition, useEffect, useState } from "react";
+import Image from "next/image";
+import {
+  startTransition,
+  useEffect,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+} from "react";
 import {
   createPublicClient,
   erc20Abi,
@@ -27,6 +33,10 @@ import type {
   SerializableAuthorizationRequest,
 } from "@/app/lib/agentic-payment-types";
 import type {
+  AgentChatMessage,
+  AgentCheckoutPublicView,
+} from "@/app/lib/agent-checkout-types";
+import type {
   CheckoutEnvironment,
   CoinbaseCheckout,
   DemoStatePayload,
@@ -35,6 +45,8 @@ import type {
   PushNetwork,
 } from "@/app/lib/coinbase-types";
 import type { EmbeddedWalletPanelConfig } from "@/components/cdp-embedded-wallet-panel";
+import { CdsIcon } from "@/components/cds-icon";
+import { DisintegrationField } from "@/components/disintegration-field";
 
 const EmbeddedWalletPanel = dynamic(
   () =>
@@ -43,10 +55,12 @@ const EmbeddedWalletPanel = dynamic(
     ),
   {
     loading: () => (
-      <div className="space-y-4">
-        <div className="h-5 w-32 animate-pulse rounded-full bg-white/60" />
-        <div className="h-14 animate-pulse rounded-[1.5rem] bg-white/60" />
-        <div className="h-14 animate-pulse rounded-[1.5rem] bg-white/60" />
+      <div className="embedded-wallet-heading" aria-busy="true">
+        <span className="wallet-status-orb" aria-hidden="true" />
+        <div>
+          <strong>Connecting wallet</strong>
+          <small>Starting a secure session…</small>
+        </div>
       </div>
     ),
     ssr: false,
@@ -58,9 +72,77 @@ type CoinbaseDemoProps = {
   initialState: DemoStatePayload;
 };
 
-type DemoFlow = "hosted" | "embedded" | "headless" | "push";
+type DemoFlow =
+  | "hosted"
+  | "embedded"
+  | "headless"
+  | "push"
+  | "agent"
+  | "x402";
+type PublicDemoFlow = "hosted" | "embedded" | "push" | "x402";
 type EmbeddedFundingAsset = "USDC" | "ETH";
 type WizardStep = "intro" | "environment" | "flow" | "experience";
+type X402DemoStage =
+  | "idle"
+  | "requesting"
+  | "payment_required"
+  | "settling"
+  | "complete"
+  | "error";
+
+function AnimatedLetterWave({
+  startIndex = 0,
+  text,
+}: {
+  startIndex?: number;
+  text: string;
+}) {
+  const segments = text.split(/(\s+)/);
+
+  return (
+    <span className="headline-wave-text" aria-hidden="true">
+      {segments.map((segment, segmentIndex) => {
+        const segmentStart =
+          startIndex +
+          segments
+            .slice(0, segmentIndex)
+            .reduce((length, previousSegment) => length + previousSegment.length, 0);
+
+        if (/^\s+$/.test(segment)) {
+          return (
+            <span className="headline-wave-space" key={`space-${segmentIndex}`}>
+              {segment}
+            </span>
+          );
+        }
+
+        return (
+          <span className="headline-wave-word" key={`${segment}-${segmentIndex}`}>
+            {Array.from(segment).map((letter, index) => (
+              <span
+                className="headline-wave-letter"
+                key={`${letter}-${index}`}
+                style={
+                  {
+                    "--wave-index": segmentStart + index,
+                  } as CSSProperties
+                }
+              >
+                {letter}
+              </span>
+            ))}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+type X402Exchange = {
+  detail: string;
+  label: string;
+  status: string;
+};
 
 type CreateCheckoutResponse = {
   checkout: CoinbaseCheckout;
@@ -78,6 +160,23 @@ type CreatePushChargeResponse = {
 
 type SyncPushChargeResponse = {
   charge: PushChargeView;
+};
+
+type CreateAgentCheckoutResponse = {
+  checkout: AgentCheckoutPublicView;
+};
+
+type AgentCheckoutResponse = {
+  checkout: AgentCheckoutPublicView;
+};
+
+type AgentChatResponse = {
+  messages?: AgentChatMessage[];
+  toolResults?: Array<{
+    name: string;
+    result: unknown;
+  }>;
+  error?: string;
 };
 
 type AgenticPaymentResponse = {
@@ -140,7 +239,6 @@ type EmbeddedSwapReceipt = {
   transactionHash: string | null;
 };
 
-const PUSH_QR_SIZE = 280;
 const BITCOIN_NETWORK: PushNetwork = "bitcoin";
 const BASE_RPC_URL = "https://mainnet.base.org";
 const BASE_USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -171,11 +269,83 @@ const environmentLabels: Record<CheckoutEnvironment, string> = {
 };
 
 const flowLabels: Record<DemoFlow, string> = {
-  embedded: "Embedded Flow",
+  agent: "Agent",
+  embedded: "Embedded Checkout",
   headless: "Headless",
-  hosted: "Hosted Flow",
-  push: "Push",
+  hosted: "Hosted Checkout",
+  push: "Direct Transfer",
+  x402: "x402",
 };
+
+const publicDemoFlows = [
+  {
+    description:
+      "Send buyers to a secure Coinbase-hosted page and return them to your product when payment completes.",
+    eyebrow: "Stablecoin checkout",
+    index: "01",
+    value: "hosted",
+  },
+  {
+    description:
+      "Keep the buyer inside your product while the same checkout lifecycle handles payment and status.",
+    eyebrow: "In-product wallet",
+    index: "02",
+    value: "embedded",
+  },
+  {
+    description:
+      "Charge APIs and agents over native HTTP with a 402 challenge, signed payment, and automatic retry.",
+    eyebrow: "Agents + APIs",
+    index: "03",
+    value: "x402",
+  },
+  {
+    description:
+      "Create a wallet-native receive request for a direct BTC or ETH transfer.",
+    eyebrow: "Wallet transfer",
+    index: "04",
+    value: "push",
+  },
+] satisfies Array<{
+  description: string;
+  eyebrow: string;
+  index: string;
+  value: PublicDemoFlow;
+}>;
+
+const publicModeDocs = {
+  hosted: {
+    href: "https://docs.cdp.coinbase.com/coinbase-business/checkout-apis/overview",
+    label: "Checkout APIs",
+  },
+  embedded: {
+    href: "https://docs.cdp.coinbase.com/wallets/client-side-development/react-components",
+    label: "Wallet SDK",
+  },
+  x402: {
+    href: "https://docs.cdp.coinbase.com/x402/welcome",
+    label: "x402 protocol",
+  },
+  push: {
+    href: "https://docs.cdp.coinbase.com/coinbase-app/transfer-apis/onchain-addresses",
+    label: "Onchain addresses",
+  },
+} satisfies Record<PublicDemoFlow, { href: string; label: string }>;
+
+const publicModeIcons = {
+  embedded: "wallet",
+  hosted: "browser",
+  push: "sendReceive",
+  x402: "api",
+} as const;
+
+const X402_CLIENT_SNIPPET = `const paidFetch = wrapFetchWithPayment(fetch, client)
+
+const response = await paidFetch(
+  "/api/x402/weather"
+)
+
+// 402 → sign → retry → 200`;
 
 const pushAssetOptions: PushAsset[] = ["BTC", "ETH"];
 
@@ -210,21 +380,23 @@ const initialMetadataFields: MetadataField[] = [
 ];
 
 const statusStyles: Record<string, string> = {
-  ACTIVE: "bg-[#e5edff] text-[#3155c4]",
-  AMOUNT_MISMATCH: "bg-[#ffe9e7] text-[#a44038]",
-  AWAITING_PAYMENT: "bg-[#e9f0ff] text-[#345ecc]",
-  COMPLETED: "bg-[#e8f7f3] text-[#1b7f63]",
-  CONVERSION_FAILED: "bg-[#ffe9e7] text-[#a44038]",
-  CONVERSION_FILLED: "bg-[#e8f7f3] text-[#1b7f63]",
-  CONVERSION_SUBMITTED: "bg-[#e9f0ff] text-[#345ecc]",
-  DEACTIVATED: "bg-[#edf1f7] text-[#55627a]",
-  EXPIRED: "bg-[#fff1dd] text-[#99631a]",
-  FAILED: "bg-[#ffe9e7] text-[#a44038]",
-  LATE_PAYMENT: "bg-[#fff1dd] text-[#99631a]",
-  PAID: "bg-[#e8f7f3] text-[#1b7f63]",
-  PARTIAL: "bg-[#fff1dd] text-[#99631a]",
-  PROCESSING: "bg-[#e9f0ff] text-[#345ecc]",
-  UNSUPPORTED: "bg-[#edf1f7] text-[#55627a]",
+  ACTIVE: "cds-status cds-status-primary",
+  AMOUNT_MISMATCH: "cds-status cds-status-negative",
+  AWAITING_PAYMENT: "cds-status cds-status-primary",
+  COMPLETED: "cds-status cds-status-positive",
+  CREATED: "cds-status cds-status-primary",
+  CONVERSION_FAILED: "cds-status cds-status-negative",
+  CONVERSION_FILLED: "cds-status cds-status-positive",
+  CONVERSION_SUBMITTED: "cds-status cds-status-primary",
+  DEACTIVATED: "cds-status cds-status-neutral",
+  EXPIRED: "cds-status cds-status-warning",
+  FAILED: "cds-status cds-status-negative",
+  LATE_PAYMENT: "cds-status cds-status-warning",
+  PAID: "cds-status cds-status-positive",
+  PARTIAL: "cds-status cds-status-warning",
+  PAYMENT_SUBMITTED: "cds-status cds-status-primary",
+  PROCESSING: "cds-status cds-status-primary",
+  UNSUPPORTED: "cds-status cds-status-neutral",
 };
 
 function formatAmount(value: number | string, currencyLabel = "USDC") {
@@ -250,7 +422,7 @@ function formatTimestamp(value?: string | null) {
 }
 
 function getStatusStyle(status: string) {
-  return statusStyles[status.toUpperCase()] ?? "bg-[#efefea] text-[#4a4a45]";
+  return statusStyles[status.toUpperCase()] ?? "cds-status cds-status-neutral";
 }
 
 function formatAttemptStage(stage: AgentCheckoutPaymentAttempt["stage"]) {
@@ -260,17 +432,17 @@ function formatAttemptStage(stage: AgentCheckoutPaymentAttempt["stage"]) {
 function getAttemptStageStyle(stage: AgentCheckoutPaymentAttempt["stage"]) {
   switch (stage) {
     case "completed":
-      return "bg-[#e8f7f3] text-[#1b7f63]";
+      return "cds-status cds-status-positive";
     case "failed":
-      return "bg-[#ffe9e7] text-[#a44038]";
+      return "cds-status cds-status-negative";
     case "submitted":
-      return "bg-[#e9f0ff] text-[#345ecc]";
+      return "cds-status cds-status-primary";
     case "signed":
-      return "bg-[#efe8ff] text-[#5a3faa]";
+      return "cds-status cds-status-primary";
     case "payload_resolved":
-      return "bg-[#fff1dd] text-[#99631a]";
+      return "cds-status cds-status-warning";
     default:
-      return "bg-[#efefea] text-[#4a4a45]";
+      return "cds-status cds-status-neutral";
   }
 }
 
@@ -524,15 +696,6 @@ function buildPushPaymentUri(pushCharge: PushChargeView) {
   return pushCharge.address;
 }
 
-function getPushQrImageUrl(value: string) {
-  const searchParams = new URLSearchParams({
-    data: value,
-    size: `${PUSH_QR_SIZE}x${PUSH_QR_SIZE}`,
-  });
-
-  return `https://api.qrserver.com/v1/create-qr-code/?${searchParams.toString()}`;
-}
-
 function persistReceiptContext(
   environment: CheckoutEnvironment,
   checkout: CoinbaseCheckout,
@@ -573,11 +736,31 @@ async function fetchPushChargeFromServer(token: string) {
 
   if (!response.ok || !("charge" in data)) {
     const message =
-      "error" in data ? data.error : "Unable to refresh the push payment.";
-    throw new Error(message ?? "Unable to refresh the push payment.");
+      "error" in data ? data.error : "Unable to refresh the direct transfer.";
+    throw new Error(message ?? "Unable to refresh the direct transfer.");
   }
 
   return data.charge;
+}
+
+async function syncAgentCheckoutFromServer(checkoutId: string) {
+  const response = await fetch(
+    `/api/coinbase/agent-checkouts/${encodeURIComponent(checkoutId)}/sync`,
+    {
+      method: "POST",
+    },
+  );
+  const data = (await response.json()) as
+    | AgentCheckoutResponse
+    | CreateCheckoutErrorResponse;
+
+  if (!response.ok || !("checkout" in data)) {
+    const message =
+      "error" in data ? data.error : "Unable to sync the agent checkout.";
+    throw new Error(message ?? "Unable to sync the agent checkout.");
+  }
+
+  return data.checkout;
 }
 
 function buildCheckoutMetadata(
@@ -701,10 +884,11 @@ function StepHeader({
       </div>
 
       <button
-        className="rounded-full border border-[var(--line)] bg-white/70 px-4 py-2 text-sm font-semibold text-[var(--foreground)] transition hover:border-[var(--accent-strong)] hover:shadow-[0_14px_38px_rgba(54,103,255,0.18)]"
+        className="cds-button cds-button-secondary cds-button-compact"
         onClick={onBack}
         type="button"
       >
+        <CdsIcon name="arrowLeft" size={16} />
         Back
       </button>
     </header>
@@ -724,12 +908,13 @@ function ReceiptField({
 }) {
   const content = href ? (
     <a
-      className="break-all text-[var(--accent-strong)] underline-offset-4 hover:underline"
+      className="inline-flex items-center gap-2 break-all text-[var(--accent-strong)] underline-offset-4 hover:underline"
       href={href}
       rel="noreferrer"
       target="_blank"
     >
       {value}
+      <CdsIcon name="externalLink" size={12} />
     </a>
   ) : (
     value
@@ -759,7 +944,7 @@ function MetadataPreview({
   }
 
   return (
-    <div className="rounded-[1.5rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-4">
+    <div className="cds-elevation-card rounded-[1.5rem] px-4 py-4">
       <p className="eyebrow">Metadata</p>
       <div className="mt-3 space-y-2">
         {Object.entries(metadata).map(([key, value]) => (
@@ -772,6 +957,155 @@ function MetadataPreview({
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function X402ProtocolPanel({
+  exchanges,
+  stage,
+}: {
+  exchanges: X402Exchange[];
+  stage: X402DemoStage;
+}) {
+  const stageLabel =
+    stage === "complete"
+      ? "Resource delivered"
+      : stage === "error"
+        ? "Demo interrupted"
+        : stage === "idle"
+          ? "Ready"
+          : "Handshake running";
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="eyebrow">HTTP exchange</p>
+          <h3 className="display-font mt-2 text-2xl font-semibold tracking-[-0.04em]">
+            One request. One payment. One retry.
+          </h3>
+        </div>
+        <span className="cds-status cds-status-neutral">
+          {stageLabel}
+        </span>
+      </div>
+
+      <div className="protocol-log" aria-live="polite">
+        {exchanges.length === 0 ? (
+          <div className="protocol-log-empty">
+            Run the handshake to watch a client encounter a 402 challenge,
+            attach payment proof, and receive the protected response.
+          </div>
+        ) : (
+          exchanges.map((exchange, index) => (
+            <div className="protocol-log-row" key={`${exchange.status}-${index}`}>
+              <span className="protocol-log-status">{exchange.status}</span>
+              <div>
+                <p className="font-semibold text-[var(--foreground)]">
+                  {exchange.label}
+                </p>
+                <p className="mt-1 text-sm leading-6 text-[var(--ink-soft)]">
+                  {exchange.detail}
+                </p>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      <p className="text-xs leading-5 text-[var(--ink-soft)]">
+        Protocol simulator: this endpoint uses the real x402 HTTP status and
+        headers, but accepts demo proof and moves no funds.
+      </p>
+    </div>
+  );
+}
+
+function AgentChatPanel({
+  checkout,
+  input,
+  isRunning,
+  messages,
+  onInputChange,
+  onPayCurrentCheckout,
+  onSubmit,
+}: {
+  checkout: AgentCheckoutPublicView | null;
+  input: string;
+  isRunning: boolean;
+  messages: AgentChatMessage[];
+  onInputChange: (value: string) => void;
+  onPayCurrentCheckout: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <div className="mt-6 rounded-[1.5rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="eyebrow">Agent Chat</p>
+          <h3 className="display-font mt-2 text-2xl font-semibold tracking-[-0.03em]">
+            Coinbiz payment agent
+          </h3>
+        </div>
+        {checkout ? (
+          <span className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] ${getStatusStyle(checkout.status)}`}>
+            {formatStatusLabel(checkout.status)}
+          </span>
+        ) : null}
+      </div>
+
+      <div className="mt-4 min-h-32 space-y-3 rounded-[1.25rem] border border-[var(--line)] bg-white/78 p-3">
+        {messages.length === 0 ? (
+          <p className="text-sm leading-7 text-[var(--ink-soft)]">
+            Paste a Coinbiz agent-checkout link here. The agent will reject arbitrary store links and only pay signed Base USDC requests under policy.
+          </p>
+        ) : (
+          messages.map((message, index) => (
+            <div
+              key={`${message.role}-${index}`}
+              className={`rounded-[1rem] px-3 py-2 text-sm leading-6 ${
+                message.role === "agent"
+                  ? "bg-[#eef4ff] text-[var(--foreground)]"
+                  : "bg-white text-[var(--ink-soft)]"
+              }`}
+            >
+              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+                {message.role === "agent" ? "Agent" : "You"}
+              </p>
+              <p className="mt-1 break-all">{message.content}</p>
+            </div>
+          ))
+        )}
+      </div>
+
+      <form className="mt-4 space-y-3" onSubmit={onSubmit}>
+        <textarea
+          className="cds-control min-h-24 w-full rounded-[1.25rem] text-sm leading-6"
+          onChange={(event) => onInputChange(event.target.value)}
+          placeholder="Paste a Coinbiz agent-checkout link or ask the agent to pay it."
+          value={input}
+        />
+        <div className="flex flex-wrap gap-3">
+          <button
+            className="cds-button cds-button-primary"
+            disabled={isRunning || !input.trim()}
+            type="submit"
+          >
+            {isRunning ? "Thinking..." : "Send"}
+          </button>
+          {checkout ? (
+            <button
+              className="cds-button cds-button-secondary"
+              disabled={isRunning || checkout.status === "paid"}
+              onClick={onPayCurrentCheckout}
+              type="button"
+            >
+              Ask agent to pay
+            </button>
+          ) : null}
+        </div>
+      </form>
     </div>
   );
 }
@@ -849,7 +1183,7 @@ function MetadataFieldsEditor({
   onUpdate: (id: string, field: "key" | "value", value: string) => void;
 }) {
   return (
-    <div className="mt-6 space-y-3">
+    <div className="metadata-editor mt-6 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm font-semibold text-[var(--foreground)]">
@@ -860,10 +1194,11 @@ function MetadataFieldsEditor({
           </p>
         </div>
         <button
-          className="rounded-full border border-[var(--line)] bg-white px-4 py-2 text-sm font-semibold text-[var(--foreground)] transition hover:border-[var(--accent-strong)] hover:shadow-[0_10px_30px_rgba(54,103,255,0.14)]"
+          className="metadata-add-action cds-button cds-button-secondary cds-button-compact"
           onClick={onAdd}
           type="button"
         >
+          <CdsIcon name="add" size={16} />
           Add field
         </button>
       </div>
@@ -872,14 +1207,14 @@ function MetadataFieldsEditor({
         {fields.map((field, index) => (
           <div
             key={field.id}
-            className="grid gap-3 rounded-[1.5rem] border border-[var(--line)] bg-[#f7f9ff] p-3 md:grid-cols-[0.9fr_1.1fr_auto]"
+            className="metadata-row grid gap-3 md:grid-cols-[0.9fr_1.1fr_auto]"
           >
             <label className="block space-y-2">
               <span className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
                 Field
               </span>
               <input
-                className="w-full rounded-[1rem] border border-[var(--line)] bg-white px-3 py-3 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--accent)]"
+                className="metadata-input"
                 onChange={(event) =>
                   onUpdate(field.id, "key", event.target.value)
                 }
@@ -892,7 +1227,7 @@ function MetadataFieldsEditor({
                 Value
               </span>
               <input
-                className="w-full rounded-[1rem] border border-[var(--line)] bg-white px-3 py-3 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--accent)]"
+                className="metadata-input"
                 onChange={(event) =>
                   onUpdate(field.id, "value", event.target.value)
                 }
@@ -901,11 +1236,12 @@ function MetadataFieldsEditor({
               />
             </label>
             <button
-              className="self-end rounded-full border border-[var(--line)] bg-white px-4 py-3 text-sm font-semibold text-[var(--ink-soft)] transition hover:border-[#efc8c3] hover:text-[#8f352d] disabled:cursor-not-allowed disabled:opacity-50"
+              className="metadata-remove-action cds-button cds-button-negative cds-button-compact self-end"
               disabled={fields.length === 1}
               onClick={() => onRemove(field.id)}
               type="button"
             >
+              <CdsIcon name="trashCan" size={16} />
               Remove
             </button>
           </div>
@@ -942,234 +1278,60 @@ function EmbeddedFundingControls({
     : undefined;
 
   return (
-    <div className="mt-6 space-y-4 rounded-[1.5rem] border border-[var(--line)] bg-white px-4 py-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="text-sm font-semibold text-[var(--foreground)]">
-            Embedded wallet funding
-          </p>
-        </div>
+    <div className="embedded-funding">
+      <div className="wallet-balance-line">
+        <span>Available</span>
+        <strong>{formatCompactCryptoAmount(balances.usdc, "USDC")}</strong>
+        <span>·</span>
+        <strong>{formatCompactCryptoAmount(balances.eth, "ETH")}</strong>
         <button
-          className="rounded-full border border-[var(--line)] bg-white px-4 py-2 text-sm font-semibold text-[var(--foreground)] transition hover:border-[var(--accent-strong)] hover:shadow-[0_10px_30px_rgba(54,103,255,0.14)] disabled:cursor-not-allowed disabled:opacity-60"
+          aria-label="Refresh wallet balances"
           disabled={!isReady || balances.status === "loading"}
           onClick={onRefreshBalances}
           type="button"
         >
-          {balances.status === "loading" ? "Refreshing..." : "Refresh balances"}
+          <CdsIcon name="refresh" size={12} />
+          {balances.status === "loading" ? "Refreshing" : "Refresh"}
         </button>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="rounded-[1.25rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
-            Base ETH
-          </p>
-          <p className="mt-2 text-lg font-semibold text-[var(--foreground)]">
-            {formatCompactCryptoAmount(balances.eth, "ETH")}
-          </p>
-        </div>
-        <div className="rounded-[1.25rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
-            Base USDC
-          </p>
-          <p className="mt-2 text-lg font-semibold text-[var(--foreground)]">
-            {formatCompactCryptoAmount(balances.usdc, "USDC")}
-          </p>
-        </div>
-      </div>
-
-      {balances.error ? (
-        <div className="rounded-[1.25rem] border border-[#efc8c3] bg-[#fbefed] px-4 py-3 text-sm text-[#8f352d]">
-          {balances.error}
-        </div>
-      ) : null}
-
-      <div className="flex flex-wrap gap-3">
+      <div className="funding-switch" aria-label="Wallet funding asset">
         {(["USDC", "ETH"] as EmbeddedFundingAsset[]).map((asset) => (
           <button
+            aria-pressed={fundingAsset === asset}
+            className={fundingAsset === asset ? "is-active" : ""}
             key={asset}
-            className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${
-              fundingAsset === asset
-                ? "border-[var(--accent-strong)] bg-[var(--accent-strong)] text-white shadow-[0_10px_35px_rgba(54,103,255,0.24)]"
-                : "border-[var(--line)] bg-white text-[var(--foreground)] hover:border-[var(--accent-strong)] hover:shadow-[0_10px_30px_rgba(54,103,255,0.14)]"
-            }`}
             onClick={() => onFundingAssetChange(asset)}
             type="button"
           >
-            {asset === "ETH" ? "ETH on Base" : "USDC on Base"}
+            {asset === "ETH" ? "Pay with ETH" : "Pay with USDC"}
           </button>
         ))}
       </div>
 
       {fundingAsset === "ETH" ? (
-        <div className="space-y-3 rounded-[1.25rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-4">
-          <div className="grid gap-3 sm:grid-cols-4">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
-                ETH needed
-              </p>
-              <p className="mt-1 text-sm font-semibold text-[var(--foreground)]">
-                {formatCompactCryptoAmount(quote.fromAmountEth, "ETH")}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
-                Expected USDC
-              </p>
-              <p className="mt-1 text-sm font-semibold text-[var(--foreground)]">
-                {formatCompactCryptoAmount(quote.expectedUsdc, "USDC")}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
-                Minimum
-              </p>
-              <p className="mt-1 text-sm font-semibold text-[var(--foreground)]">
-                {formatCompactCryptoAmount(quote.minUsdc, "USDC")}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
-                Network fee
-              </p>
-              <p className="mt-1 text-sm font-semibold text-[var(--foreground)]">
-                {formatNetworkFeeEth(quote.networkFeeEth)}
-              </p>
-            </div>
-          </div>
-
-          {quote.status === "loading" ? (
-            <p className="text-sm text-[var(--ink-soft)]">
-              Calculating the ETH amount needed to pay $0.01 USDC...
-            </p>
-          ) : null}
-
-          {quote.status === "success" && !quoteCoversPayment ? (
-            <div className="rounded-[1rem] border border-[#efc8c3] bg-[#fbefed] px-4 py-3 text-sm text-[#8f352d]">
-              The automatic quote did not cover the $0.01 checkout. Refresh
-              balances and try again.
-            </div>
-          ) : null}
-
-          {quote.error ? (
-            <div className="rounded-[1rem] border border-[#efc8c3] bg-[#fbefed] px-4 py-3 text-sm text-[#8f352d]">
-              {quote.error}
-            </div>
-          ) : null}
-        </div>
+        <p className="funding-quote">
+          {quote.status === "loading"
+            ? "Quoting an ETH → USDC swap…"
+            : `${formatCompactCryptoAmount(quote.fromAmountEth, "ETH")} converts to approximately ${formatCompactCryptoAmount(quote.expectedUsdc, "USDC")} · fee ${formatNetworkFeeEth(quote.networkFeeEth)}`}
+        </p>
       ) : null}
 
-      {paymentPhase ? (
-        <div className="rounded-[1.25rem] border border-[#c8d7ff] bg-[#eef4ff] px-4 py-3 text-sm font-semibold text-[#345ecc]">
-          {paymentPhase}
-        </div>
+      {balances.error || quote.error || (quote.status === "success" && !quoteCoversPayment) ? (
+        <p className="funding-error">
+          {balances.error ?? quote.error ?? "The swap quote does not cover this payment yet."}
+        </p>
       ) : null}
+
+      {paymentPhase ? <p className="funding-phase">{paymentPhase}</p> : null}
 
       {swapReceipt ? (
-        <div className="divide-y divide-[var(--line)] rounded-[1.25rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-2">
-          <ReceiptField label="Swap status" value={formatStatusLabel(swapReceipt.status)} />
-          <ReceiptField
-            label="Swap tx"
-            mono
-            href={swapTxUrl}
-            value={swapReceipt.transactionHash ?? "Pending"}
-          />
-          <ReceiptField
-            label="ETH swapped"
-            value={`${swapReceipt.fromAmountEth} ETH`}
-          />
-          <ReceiptField
-            label="Minimum USDC"
-            value={`${swapReceipt.minUsdc} USDC`}
-          />
-        </div>
+        <details className="advanced-fields">
+          <summary>Swap receipt</summary>
+          <ReceiptField label="Status" value={formatStatusLabel(swapReceipt.status)} />
+          <ReceiptField label="Transaction" mono href={swapTxUrl} value={swapReceipt.transactionHash ?? "Pending"} />
+        </details>
       ) : null}
-    </div>
-  );
-}
-
-function HeadlessExecutionLog({
-  attempt,
-  checkout,
-}: {
-  attempt: AgentCheckoutPaymentAttempt | null;
-  checkout: CoinbaseCheckout | null;
-}) {
-  const completed = attempt?.stage === "completed";
-  const failed = attempt?.stage === "failed";
-  const entries = [
-    {
-      detail: checkout?.id ?? attempt?.checkoutId ?? "Waiting for checkout",
-      done: Boolean(checkout || attempt),
-      label: "Checkout created",
-    },
-    {
-      detail: attempt?.tokenCollector ?? "Waiting for payment payload",
-      done: Boolean(attempt?.tokenCollector),
-      label: "Payload resolved",
-    },
-    {
-      detail: attempt?.signatureRef ? "Payment-scoped authorization ready" : "Waiting for signer",
-      done: Boolean(attempt?.signatureRef),
-      label: "Server authorization signed",
-    },
-    {
-      detail: attempt?.submissionRequestId ?? "Waiting for submission",
-      done: Boolean(attempt?.submissionRequestId),
-      label: "Submitted to Coinbase",
-    },
-    {
-      detail: failed
-        ? attempt?.errorMessage ?? "Payment failed"
-        : completed
-          ? attempt?.txHash ?? "Completed"
-          : "Waiting for reconciliation",
-      done: completed || failed,
-      failed,
-      label: failed ? "Failed" : completed ? "Completed" : "Reconciled",
-    },
-  ];
-
-  return (
-    <div className="rounded-[2rem] border border-[var(--line)] bg-white/86 p-6 shadow-[0_18px_50px_rgba(54,103,255,0.12)]">
-      <div className="space-y-2">
-        <p className="eyebrow">Headless Flow</p>
-        <h2 className="display-font text-2xl font-semibold tracking-[-0.03em]">
-          What happens
-        </h2>
-        <p className="text-sm leading-7 text-[var(--ink-soft)]">
-          Headless creates a Coinbase checkout, resolves the payment payload,
-          signs a payment-scoped USDC authorization on the server, submits it to
-          Coinbase, and reconciles settlement.
-        </p>
-      </div>
-
-      <div className="mt-5 space-y-3">
-        {entries.map((entry) => (
-          <div
-            key={entry.label}
-            className="flex items-start gap-3 rounded-[1.25rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-3"
-          >
-            <span
-              className={`mt-1 h-2.5 w-2.5 rounded-full ${
-                entry.failed
-                  ? "bg-[#a44038]"
-                  : entry.done
-                    ? "bg-[#1b7f63]"
-                    : "bg-[#aeb8cc]"
-              }`}
-            />
-            <div>
-              <p className="text-sm font-semibold text-[var(--foreground)]">
-                {entry.label}
-              </p>
-              <p className="mt-1 break-all text-xs leading-5 text-[var(--ink-soft)]">
-                {entry.detail}
-              </p>
-            </div>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
@@ -1215,6 +1377,14 @@ export function CoinbaseDemo({
   const [pushCreating, setPushCreating] = useState(false);
   const [pushErrorMessage, setPushErrorMessage] = useState<string | null>(null);
   const [pushToken, setPushToken] = useState<string | null>(null);
+  const [agentCheckout, setAgentCheckout] =
+    useState<AgentCheckoutPublicView | null>(null);
+  const [agentChatInput, setAgentChatInput] = useState("");
+  const [agentChatMessages, setAgentChatMessages] = useState<AgentChatMessage[]>([]);
+  const [agentChatRunning, setAgentChatRunning] = useState(false);
+  const [agentCreating, setAgentCreating] = useState(false);
+  const [x402Stage, setX402Stage] = useState<X402DemoStage>("idle");
+  const [x402Exchanges, setX402Exchanges] = useState<X402Exchange[]>([]);
   const [embeddedWalletSession, setEmbeddedWalletSession] =
     useState<EmbeddedWalletSessionState>({
       email: null,
@@ -1298,7 +1468,7 @@ export function CoinbaseDemo({
       : null;
   const currentErrorMessage =
     selectedFlow === "push" ? pushErrorMessage : checkoutErrorMessage;
-  const pushQrValue = pushCharge ? buildPushPaymentUri(pushCharge) : null;
+  const pushPaymentUri = pushCharge ? buildPushPaymentUri(pushCharge) : null;
 
   function resetMessages() {
     setCheckoutErrorMessage(null);
@@ -1332,14 +1502,10 @@ export function CoinbaseDemo({
     );
   }
 
-  function resetSelectionsOnMount() {
+  useEffect(() => {
     setWizardStep("intro");
     setSelectedFlow(null);
     setEnvironment("sandbox");
-  }
-
-  useEffect(() => {
-    resetSelectionsOnMount();
   }, []);
 
   useEffect(() => {
@@ -1690,7 +1856,7 @@ export function CoinbaseDemo({
           setPushErrorMessage(
             error instanceof Error
               ? error.message
-              : "Unable to refresh push payment.",
+              : "Unable to refresh the direct transfer.",
           );
         }
       }
@@ -1707,6 +1873,48 @@ export function CoinbaseDemo({
       window.clearInterval(intervalId);
     };
   }, [pushCharge?.status, pushToken]);
+
+  useEffect(() => {
+    if (
+      !agentCheckout ||
+      agentCheckout.status === "paid" ||
+      agentCheckout.status === "failed" ||
+      agentCheckout.status === "expired" ||
+      agentCheckout.status === "amount_mismatch"
+    ) {
+      return;
+    }
+
+    const checkoutId = agentCheckout.id;
+    let cancelled = false;
+
+    async function syncAgentCheckout() {
+      try {
+        const nextCheckout = await syncAgentCheckoutFromServer(checkoutId);
+
+        if (!cancelled) {
+          setAgentCheckout(nextCheckout);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setCheckoutErrorMessage(
+            error instanceof Error
+              ? error.message
+              : "Unable to sync agent checkout.",
+          );
+        }
+      }
+    }
+
+    const intervalId = window.setInterval(() => {
+      void syncAgentCheckout();
+    }, 6000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [agentCheckout]);
 
   function prepareMetadata(
     flow: DemoFlow,
@@ -2030,24 +2238,225 @@ export function CoinbaseDemo({
 
       if (!response.ok || !("charge" in data) || !("token" in data)) {
         const errorMessage =
-          "error" in data ? data.error : "Unable to create push payment.";
-        throw new Error(errorMessage ?? "Unable to create push payment.");
+          "error" in data ? data.error : "Unable to create the receive address.";
+        throw new Error(errorMessage ?? "Unable to create the receive address.");
       }
 
       setPushCharge(data.charge);
       setPushToken(data.token);
     } catch (error) {
       setPushErrorMessage(
-        error instanceof Error ? error.message : "Unable to create push payment.",
+        error instanceof Error ? error.message : "Unable to create the receive address.",
       );
     } finally {
       setPushCreating(false);
     }
   }
 
+  function updateAgentCheckoutFromToolResults(
+    toolResults: AgentChatResponse["toolResults"],
+  ) {
+    if (!toolResults) {
+      return;
+    }
+
+    for (const toolResult of toolResults) {
+      const result = toolResult.result as Partial<AgentCheckoutPublicView> | null;
+
+      if (
+        result &&
+        typeof result === "object" &&
+        typeof result.id === "string" &&
+        typeof result.amountUsdc === "string" &&
+        typeof result.status === "string"
+      ) {
+        setAgentCheckout(result as AgentCheckoutPublicView);
+      }
+    }
+  }
+
+  async function submitAgentChatMessage(message: string, autoPay = false) {
+    if (!message.trim()) {
+      return;
+    }
+
+    try {
+      setAgentChatRunning(true);
+      resetMessages();
+      setAgentChatMessages((currentMessages) => [
+        ...currentMessages,
+        {
+          content: message.trim(),
+          role: "tool",
+          toolName: "inspect_coinbiz_checkout_link",
+        },
+      ]);
+
+      const response = await fetch("/api/coinbase/agent-chat", {
+        body: JSON.stringify({
+          autoPay,
+          message,
+        }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        method: "POST",
+      });
+      const data = (await response.json()) as AgentChatResponse;
+
+      if (!response.ok) {
+        throw new Error(data.error || "Unable to run agent chat.");
+      }
+
+      updateAgentCheckoutFromToolResults(data.toolResults);
+      setAgentChatMessages((currentMessages) => [
+        ...currentMessages,
+        ...(data.messages ?? []),
+      ]);
+      setAgentChatInput("");
+    } catch (error) {
+      setCheckoutErrorMessage(
+        error instanceof Error ? error.message : "Unable to run agent chat.",
+      );
+    } finally {
+      setAgentChatRunning(false);
+    }
+  }
+
+  async function handleCreateAgentCheckout() {
+    if (environment !== "live") {
+      setCheckoutErrorMessage("Agent flow is live-only.");
+      return;
+    }
+
+    try {
+      setAgentCreating(true);
+      resetMessages();
+
+      const { metadata } = prepareMetadata("agent", {
+        agentPolicy: "autonomous-under-cap",
+        fundingAsset: "USDC",
+        fundingNetwork: "base",
+      });
+      const response = await fetch("/api/coinbase/agent-checkouts", {
+        body: JSON.stringify({
+          amountUsdc: totalAmount.toFixed(2),
+          description: "Agent checkout · $0.01 test payment",
+          metadata,
+          reference: metadata.reference,
+        }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        method: "POST",
+      });
+      const data = (await response.json()) as
+        | CreateAgentCheckoutResponse
+        | CreateCheckoutErrorResponse;
+
+      if (!response.ok || !("checkout" in data)) {
+        const errorMessage =
+          "error" in data ? data.error : "Unable to create agent checkout.";
+        throw new Error(errorMessage ?? "Unable to create agent checkout.");
+      }
+
+      setAgentCheckout(data.checkout);
+      setAgentChatMessages([
+        {
+          content: `Created agent checkout ${data.checkout.checkoutUrl}`,
+          role: "agent",
+        },
+      ]);
+      setAgentChatInput(`Pay ${data.checkout.checkoutUrl}`);
+    } catch (error) {
+      setCheckoutErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to create agent checkout.",
+      );
+    } finally {
+      setAgentCreating(false);
+    }
+  }
+
+  async function handleRunX402Demo() {
+    try {
+      resetMessages();
+      setX402Stage("requesting");
+      setX402Exchanges([
+        {
+          detail: "The client requests a paid market signal with ordinary fetch().",
+          label: "GET /api/x402/weather",
+          status: "GET",
+        },
+      ]);
+
+      const challengeResponse = await fetch("/api/x402/weather", {
+        cache: "no-store",
+      });
+      const paymentRequired = challengeResponse.headers.get("payment-required");
+
+      if (challengeResponse.status !== 402 || !paymentRequired) {
+        throw new Error("The demo endpoint did not return an x402 challenge.");
+      }
+
+      setX402Stage("payment_required");
+      setX402Exchanges((currentExchanges) => [
+        ...currentExchanges,
+        {
+          detail:
+            "The server returns base64-encoded price, network, asset, and recipient requirements.",
+          label: "PAYMENT-REQUIRED header",
+          status: "402",
+        },
+      ]);
+
+      await new Promise((resolve) => window.setTimeout(resolve, 450));
+      setX402Stage("settling");
+      setX402Exchanges((currentExchanges) => [
+        ...currentExchanges,
+        {
+          detail:
+            "An x402 client would sign the accepted requirement and retry the original request.",
+          label: "Retry with PAYMENT-SIGNATURE",
+          status: "PAY",
+        },
+      ]);
+
+      const paidResponse = await fetch("/api/x402/weather", {
+        cache: "no-store",
+        headers: {
+          "PAYMENT-SIGNATURE": "coinbiz-demo-signature",
+        },
+      });
+      const paymentResponse = paidResponse.headers.get("payment-response");
+
+      if (!paidResponse.ok || !paymentResponse) {
+        throw new Error("The demo payment could not be settled.");
+      }
+
+      setX402Stage("complete");
+      setX402Exchanges((currentExchanges) => [
+        ...currentExchanges,
+        {
+          detail:
+            "The protected JSON is returned with settlement details in PAYMENT-RESPONSE.",
+          label: "Paid resource delivered",
+          status: "200",
+        },
+      ]);
+    } catch (error) {
+      setX402Stage("error");
+      setCheckoutErrorMessage(
+        error instanceof Error ? error.message : "Unable to run the x402 demo.",
+      );
+    }
+  }
+
   function handleBack() {
     if (wizardStep === "experience") {
-      setWizardStep("flow");
+      setWizardStep("intro");
+      window.scrollTo({ behavior: "auto", top: 0 });
       return;
     }
 
@@ -2061,30 +2470,35 @@ export function CoinbaseDemo({
     }
   }
 
-  function handleStart() {
-    resetMessages();
-    setWizardStep("environment");
-  }
-
   function handleSelectEnvironment(nextEnvironment: CheckoutEnvironment) {
     resetMessages();
     setEnvironment(nextEnvironment);
+
+    if (wizardStep === "experience" && selectedFlow) {
+      return;
+    }
+
     setSelectedFlow(null);
     setWizardStep("flow");
   }
 
-  function isFlowAvailable(flow: DemoFlow) {
-    return environment === "live" || flow === "hosted";
+  function isFlowAvailable(
+    flow: DemoFlow,
+    candidateEnvironment: CheckoutEnvironment = environment,
+  ) {
+    return (
+      candidateEnvironment === "live" || flow === "hosted" || flow === "x402"
+    );
   }
 
   function handleSelectFlow(flow: DemoFlow) {
-    if (!isFlowAvailable(flow)) {
-      return;
-    }
-
     resetMessages();
+    if (!isFlowAvailable(flow)) {
+      setEnvironment("live");
+    }
     setSelectedFlow(flow);
     setWizardStep("experience");
+    window.scrollTo({ behavior: "auto", top: 0 });
   }
 
   async function handleSelectedFlowAction() {
@@ -2104,6 +2518,16 @@ export function CoinbaseDemo({
 
     if (selectedFlow === "headless") {
       await handleCreateHeadlessCheckout();
+      return;
+    }
+
+    if (selectedFlow === "agent") {
+      await handleCreateAgentCheckout();
+      return;
+    }
+
+    if (selectedFlow === "x402") {
+      await handleRunX402Demo();
       return;
     }
 
@@ -2136,13 +2560,26 @@ export function CoinbaseDemo({
 
   const actionDisabled =
     !selectedFlow ||
-    !demoState.credentialsConfigured ||
+    (!demoState.credentialsConfigured && selectedFlow !== "x402") ||
     checkoutCreating ||
     headlessCreating ||
+    agentCreating ||
+    agentChatRunning ||
     pushCreating ||
     (selectedFlow === "embedded" && !embeddedWalletReady);
   const selectedActionDisabled =
-    actionDisabled || (selectedFlow === "embedded" && !embeddedEthSwapReady);
+    actionDisabled ||
+    (selectedFlow === "embedded" && !embeddedEthSwapReady) ||
+    (selectedFlow === "x402" &&
+      (x402Stage === "requesting" || x402Stage === "settling"));
+  const selectedActionLoading =
+    checkoutCreating ||
+    headlessCreating ||
+    agentCreating ||
+    agentChatRunning ||
+    pushCreating ||
+    x402Stage === "requesting" ||
+    x402Stage === "settling";
 
   const actionLabel =
     selectedFlow === "hosted"
@@ -2159,14 +2596,31 @@ export function CoinbaseDemo({
               ? "Swap ETH & pay $0.01"
               : "Pay $0.01 with embedded wallet"
             : "Sign in to continue"
+        : selectedFlow === "x402"
+          ? x402Stage === "requesting" || x402Stage === "settling"
+            ? "Running handshake..."
+            : x402Stage === "complete"
+              ? "Run it again"
+              : "Run 402 handshake"
         : selectedFlow === "headless"
           ? headlessCreating
             ? "Submitting..."
             : "Submit headless payment"
+          : selectedFlow === "agent"
+            ? agentCreating
+              ? "Creating..."
+              : "Create agent checkout"
           : pushCreating
             ? "Generating..."
-            : "Create push payment";
-  const receiptCard = renderReceiptCard();
+            : "Create receive address";
+  const hasLiveOutput =
+    (selectedFlow === "hosted" && Boolean(selectedCheckout)) ||
+    (selectedFlow === "embedded" && Boolean(selectedAttempt)) ||
+    (selectedFlow === "x402" && x402Exchanges.length > 0) ||
+    (selectedFlow === "push" && Boolean(pushCharge)) ||
+    (selectedFlow === "headless" && Boolean(selectedAttempt)) ||
+    (selectedFlow === "agent" && Boolean(agentCheckout));
+  const receiptCard = hasLiveOutput ? renderReceiptCard() : null;
 
   function renderReceiptCard() {
     if (selectedFlow === "hosted") {
@@ -2208,48 +2662,37 @@ export function CoinbaseDemo({
             </span>
           </div>
 
-          <div className="divide-y divide-[var(--line)] rounded-[1.5rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-2">
+          <div className="receipt-core">
             <ReceiptField label="Amount" value={formatAmount(selectedCheckout.amount)} />
-            <ReceiptField label="Reference" value={getReference(receiptMetadata)} />
-            <ReceiptField label="Checkout ID" mono value={selectedCheckout.id} />
             <ReceiptField
               href={selectedCheckout.url}
               label="Payment URL"
               mono
               value={selectedCheckout.url}
             />
-            <ReceiptField label="Network" value={formatStatusLabel(selectedCheckout.network)} />
-            <ReceiptField
-              label="Transaction hash"
-              mono
-              href={txUrl}
-              value={selectedCheckout.transactionHash ?? "Pending"}
-            />
-            <ReceiptField
-              label="Created"
-              value={formatTimestamp(selectedCheckout.createdAt)}
-            />
-            <ReceiptField
-              label="Last updated"
-              value={formatTimestamp(
-                selectedCheckout.updatedAt ?? selectedCheckout.createdAt,
-              )}
-            />
           </div>
 
           {!isCompleted ? (
             <button
-              className="rounded-full bg-[var(--accent-strong)] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent)] hover:shadow-[0_14px_44px_rgba(54,103,255,0.28)]"
+              className="cds-button cds-button-primary"
               onClick={() =>
                 window.open(selectedCheckout.url, "_blank", "noopener,noreferrer")
               }
               type="button"
             >
               Open hosted checkout
+              <CdsIcon name="externalLink" size={16} />
             </button>
           ) : null}
 
-          <MetadataPreview metadata={receiptMetadata} />
+          <details className="advanced-fields">
+            <summary>Checkout details</summary>
+            <ReceiptField label="Reference" value={getReference(receiptMetadata)} />
+            <ReceiptField label="Checkout ID" mono value={selectedCheckout.id} />
+            <ReceiptField label="Network" value={formatStatusLabel(selectedCheckout.network)} />
+            <ReceiptField label="Transaction" mono href={txUrl} value={selectedCheckout.transactionHash ?? "Pending"} />
+            <MetadataPreview metadata={receiptMetadata} />
+          </details>
         </div>
       );
     }
@@ -2289,7 +2732,7 @@ export function CoinbaseDemo({
             </span>
           </div>
 
-          <div className="divide-y divide-[var(--line)] rounded-[1.5rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-2">
+          <div className="receipt-core">
             <ReceiptField label="Amount" value={formatAmount(selectedAttempt.amount)} />
             <ReceiptField label="Reference" value={getReference(receiptMetadata)} />
             <ReceiptField label="Checkout ID" mono value={selectedAttempt.checkoutId} />
@@ -2362,7 +2805,7 @@ export function CoinbaseDemo({
           </div>
 
           {selectedAttempt.errorMessage ? (
-            <div className="rounded-[1.5rem] border border-[#efc8c3] bg-[#fbefed] px-4 py-3 text-sm text-[#8f352d]">
+            <div className="cds-feedback cds-feedback-negative">
               {selectedAttempt.errorMessage}
             </div>
           ) : null}
@@ -2372,11 +2815,15 @@ export function CoinbaseDemo({
       );
     }
 
+    if (selectedFlow === "x402") {
+      return <X402ProtocolPanel exchanges={x402Exchanges} stage={x402Stage} />;
+    }
+
     if (selectedFlow === "push") {
       if (!pushCharge) {
         return (
           <p className="text-sm leading-7 text-[var(--ink-soft)]">
-            Create the push payment and the receive details will appear here.
+            Create a receive address and its payment details will appear here.
           </p>
         );
       }
@@ -2404,45 +2851,111 @@ export function CoinbaseDemo({
             </span>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-[180px_1fr]">
-            <div className="aspect-square rounded-[1.5rem] border border-[var(--line)] bg-white p-4 shadow-[0_18px_42px_rgba(54,103,255,0.1)]">
-              <Image
-                alt={`${pushCharge.asset} payment QR code`}
-                className="h-full w-full rounded-[1rem] object-contain"
-                height={PUSH_QR_SIZE}
-                sizes="180px"
-                src={getPushQrImageUrl(pushQrValue ?? pushCharge.address)}
-                width={PUSH_QR_SIZE}
-              />
-            </div>
-
-            <div className="divide-y divide-[var(--line)] rounded-[1.5rem] border border-[var(--line)] bg-[#f7f9ff] px-4 py-2">
-              <ReceiptField label="Asset" value={pushCharge.asset} />
-              <ReceiptField
-                label="Quoted amount"
-                value={`${pushCharge.quotedAmount} ${pushCharge.asset}`}
-              />
-              <ReceiptField label="USD amount" value={formatAmount(pushCharge.amountUsd, "USD")} />
-              <ReceiptField label="Network" value={formatStatusLabel(pushCharge.network)} />
-              <ReceiptField label="Address" mono value={pushCharge.address} />
-              <ReceiptField
-                label="Received"
-                value={`${pushCharge.payment.totalReceivedAmount} ${pushCharge.asset}`}
-              />
-              <ReceiptField
-                href={latestTransactionUrl}
-                label="Latest transaction"
-                mono
-                value={pushCharge.payment.latestTransactionHash ?? "Pending"}
-              />
-              <ReceiptField
-                label="Expires"
-                value={formatTimestamp(pushCharge.payment.expiresAt)}
-              />
-            </div>
+          <div className="receipt-core">
+            <ReceiptField
+              label="Send exactly"
+              value={`${pushCharge.quotedAmount} ${pushCharge.asset}`}
+            />
+            <ReceiptField label="Address" mono value={pushCharge.address} />
+            <ReceiptField
+              label="Payment URI"
+              mono
+              value={pushPaymentUri ?? pushCharge.address}
+            />
           </div>
 
-          <MetadataPreview metadata={receiptMetadata} />
+          <details className="advanced-fields">
+            <summary>Transfer details</summary>
+            <ReceiptField label="USD amount" value={formatAmount(pushCharge.amountUsd, "USD")} />
+            <ReceiptField label="Network" value={formatStatusLabel(pushCharge.network)} />
+            <ReceiptField label="Received" value={`${pushCharge.payment.totalReceivedAmount} ${pushCharge.asset}`} />
+            <ReceiptField href={latestTransactionUrl} label="Latest transaction" mono value={pushCharge.payment.latestTransactionHash ?? "Pending"} />
+            <ReceiptField label="Expires" value={formatTimestamp(pushCharge.payment.expiresAt)} />
+            <MetadataPreview metadata={receiptMetadata} />
+          </details>
+        </div>
+      );
+    }
+
+    if (selectedFlow === "agent") {
+      if (!agentCheckout) {
+        return (
+          <p className="text-sm leading-7 text-[var(--ink-soft)]">
+            Create an agent checkout and the signed request will appear here.
+          </p>
+        );
+      }
+
+      const txUrl = agentCheckout.txHash
+        ? getNetworkExplorerUrl(agentCheckout.chain, agentCheckout.txHash)
+        : undefined;
+
+      return (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="eyebrow">Receipt</p>
+              <h3 className="display-font mt-2 text-2xl font-semibold tracking-[-0.03em]">
+                {agentCheckout.status === "paid"
+                  ? "Payment received"
+                  : agentCheckout.status === "payment_submitted"
+                    ? "Payment submitted"
+                    : "Agent checkout created"}
+              </h3>
+            </div>
+            <span
+              className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] ${getStatusStyle(
+                agentCheckout.status,
+              )}`}
+            >
+              {formatStatusLabel(agentCheckout.status)}
+            </span>
+          </div>
+
+          <div className="receipt-core">
+            <ReceiptField label="Amount" value={formatAmount(agentCheckout.amountUsdc)} />
+            <ReceiptField label="Reference" value={agentCheckout.reference} />
+            <ReceiptField label="Checkout ID" mono value={agentCheckout.id} />
+            <ReceiptField
+              href={agentCheckout.checkoutUrl}
+              label="Agent link"
+              mono
+              value={agentCheckout.checkoutUrl}
+            />
+            <ReceiptField
+              label="Recipient"
+              mono
+              value={agentCheckout.recipientAddress}
+            />
+            <ReceiptField label="Network" value={formatStatusLabel(agentCheckout.chain)} />
+            <ReceiptField
+              label="Wallet provider"
+              value={agentCheckout.walletProvider ?? "Pending"}
+            />
+            <ReceiptField
+              href={txUrl}
+              label="Transaction hash"
+              mono
+              value={agentCheckout.txHash ?? "Pending"}
+            />
+            <ReceiptField
+              label="Signature"
+              mono
+              value={agentCheckout.paymentRequestSignature}
+            />
+            <ReceiptField
+              label="Expires"
+              value={formatTimestamp(agentCheckout.expiresAt)}
+            />
+          </div>
+
+          {agentCheckout.errorMessage ? (
+            <div className="cds-feedback cds-feedback-negative">
+              {agentCheckout.errorMessage}
+            </div>
+          ) : null}
+
+          <MetadataPreview metadata={agentCheckout.metadata} />
         </div>
       );
     }
@@ -2451,24 +2964,73 @@ export function CoinbaseDemo({
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-6 py-10 lg:px-8">
+    <main className="coinbiz-shell min-h-screen">
       {wizardStep === "intro" ? (
-        <section className="flex min-h-[82vh] flex-1 items-center justify-center">
-          <div className="w-full max-w-3xl rounded-[2.5rem] border border-[#9bb6ff]/65 bg-[linear-gradient(160deg,#5f86ff_0%,#3d6eff_52%,#1e4fe4_100%)] px-10 py-16 text-center text-white shadow-[0_28px_82px_rgba(54,103,255,0.34)]">
-            <h1 className="display-font text-5xl font-semibold tracking-[-0.06em] sm:text-7xl">
-              Coinbase Business Demo
-            </h1>
-            <div className="mt-10">
-              <button
-                className="rounded-full bg-white px-8 py-4 text-sm font-semibold text-[#1e4fe4] transition hover:shadow-[0_18px_48px_rgba(255,255,255,0.28)]"
-                onClick={handleStart}
-                type="button"
-              >
-                Start
-              </button>
+        <div className="future-home">
+          <header className="future-nav">
+            <a className="brand-lockup" href="#top" aria-label="CoinBiz home">
+              <Image
+                alt=""
+                className="brand-logo"
+                fetchPriority="high"
+                height={64}
+                src="/coinbiz_logo.png"
+                width={310}
+              />
+            </a>
+          </header>
+
+          <section className="future-hero" id="top">
+            <DisintegrationField />
+            <div className="future-hero-copy">
+              <h1 className="future-title">
+                <span aria-hidden="true">
+                  <span className="signal-sweep-text">Payments</span>
+                  <AnimatedLetterWave text=", for every" />
+                  <br />
+                  <AnimatedLetterWave startIndex={11} text="way value moves." />
+                </span>
+                <span className="sr-only">
+                  Payments, for every way value moves.
+                </span>
+              </h1>
+              <p className="future-description">
+                Stablecoin payments for people and agents across AI
+                infrastructure and digital services—from inference and LLM
+                gateways to GPU compute and paid APIs. Powered by Coinbase
+                Business.
+              </p>
             </div>
-          </div>
-        </section>
+
+            <div className="future-mode-dock" id="modes" aria-label="Payment modes">
+              {publicDemoFlows.map((flow) => (
+                <button
+                  className="future-mode"
+                  key={flow.value}
+                  onClick={() => handleSelectFlow(flow.value)}
+                  type="button"
+                >
+                  <span className="future-mode-index">
+                    <CdsIcon
+                      active
+                      name={publicModeIcons[flow.value]}
+                      size={24}
+                    />
+                  </span>
+                  <span className="future-mode-copy">
+                    <strong>{flowLabels[flow.value]}</strong>
+                    <small>{flow.eyebrow}</small>
+                  </span>
+                  <CdsIcon
+                    className="future-mode-arrow"
+                    name="forwardArrow"
+                    size={16}
+                  />
+                </button>
+              ))}
+            </div>
+          </section>
+        </div>
       ) : null}
 
       {wizardStep === "environment" ? (
@@ -2496,8 +3058,8 @@ export function CoinbaseDemo({
                   </h2>
                   <p className="max-w-sm text-sm leading-7 text-blue-50/88">
                     {value === "live"
-                      ? "Use live mode for embedded, headless, and push payments."
-                      : "Use sandbox when you only want to test the hosted checkout path."}
+                      ? "Use live mode for embedded checkout and direct transfers."
+                      : "Use sandbox for hosted checkout and the x402 protocol simulator."}
                   </p>
                 </div>
               </button>
@@ -2522,8 +3084,8 @@ export function CoinbaseDemo({
                   value: "embedded",
                 },
                 {
-                  description: "Create a checkout and let the server signer complete payment.",
-                  value: "headless",
+                  description: "Run an HTTP-native 402 payment handshake for a protected API.",
+                  value: "x402",
                 },
                 {
                   description: "Generate a direct BTC or ETH payment request.",
@@ -2574,79 +3136,134 @@ export function CoinbaseDemo({
       ) : null}
 
       {wizardStep === "experience" && selectedFlow ? (
-        <section className="space-y-8">
-          <StepHeader onBack={handleBack} stepLabel="Step 3 of 3" title={selectedFlowTitle!} />
-
-          <div className="mx-auto w-full max-w-3xl space-y-5">
-            {selectedFlow === "embedded" ? (
-              <div className="rounded-[2rem] border border-[var(--line)] bg-white/86 p-6 shadow-[0_18px_50px_rgba(54,103,255,0.12)]">
-                {embeddedWalletConfig.projectId ? (
-                  <EmbeddedWalletPanel config={embeddedWalletConfig} variant="compact" />
-                ) : (
-                  <div className="space-y-2">
-                    <p className="eyebrow">Embedded Wallet</p>
-                    <h2 className="display-font text-2xl font-semibold tracking-[-0.03em]">
-                      Missing CDP project ID
-                    </h2>
-                    <p className="text-sm leading-7 text-[var(--ink-soft)]">
-                      Add
-                      {" "}
-                      <span className="font-mono text-[var(--foreground)]">
-                        NEXT_PUBLIC_CDP_PROJECT_ID
-                      </span>
-                      {" "}
-                      to enable embedded wallet sign-in.
-                    </p>
-                  </div>
-                )}
+        <section className="demo-workspace">
+          <DisintegrationField />
+          <header className="workspace-header">
+            <button className="workspace-back" onClick={handleBack} type="button">
+              <CdsIcon name="arrowLeft" size={16} /> Overview
+            </button>
+            {selectedFlow === "x402" ? (
+              <div className="workspace-simulation-badge" aria-label="No funds mode">
+                <span aria-hidden="true" /> No funds
               </div>
-            ) : null}
+            ) : (
+              <div className="workspace-environment" aria-label="Environment">
+                {(["sandbox", "live"] as CheckoutEnvironment[]).map((value) => {
+                  const available = isFlowAvailable(selectedFlow, value);
 
-            {selectedFlow === "headless" ? (
-              <HeadlessExecutionLog
-                attempt={currentHeadlessAttempt}
-                checkout={selectedCheckout}
-              />
-            ) : null}
+                  return (
+                    <button
+                      aria-pressed={environment === value}
+                      className={environment === value ? "is-active" : ""}
+                      disabled={!available}
+                      key={value}
+                      onClick={() => handleSelectEnvironment(value)}
+                      type="button"
+                    >
+                      {environmentLabels[value]}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </header>
 
-            <div className="rounded-[2rem] border border-[var(--line)] bg-white/86 p-6 shadow-[0_18px_50px_rgba(54,103,255,0.12)]">
+          <div className="workspace-mode-nav" aria-label="Payment modes">
+            {publicDemoFlows.map((flow) => (
+              <button
+                aria-pressed={selectedFlow === flow.value}
+                className={selectedFlow === flow.value ? "is-active" : ""}
+                key={flow.value}
+                onClick={() => handleSelectFlow(flow.value)}
+                type="button"
+              >
+                <span className="workspace-mode-index">
+                  <CdsIcon
+                    active={selectedFlow === flow.value}
+                    name={publicModeIcons[flow.value]}
+                    size={24}
+                  />
+                </span>
+                <span className="workspace-mode-copy">
+                  <strong>{flowLabels[flow.value]}</strong>
+                  <small>{flow.eyebrow}</small>
+                </span>
+                <CdsIcon
+                  className="workspace-mode-arrow"
+                  name="forwardArrow"
+                  size={16}
+                />
+              </button>
+            ))}
+          </div>
+
+          <div className={`workspace-layout${hasLiveOutput ? " has-output" : ""}`}>
+            <div className="workspace-main space-y-5">
+              <div className="workspace-card p-6 sm:p-8">
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div className="space-y-2">
-                  <p className="eyebrow">Payment</p>
+                  <p className="eyebrow">
+                    {selectedFlow === "x402" ? "Paid API" : "Payment"}
+                  </p>
                   <h2 className="display-font text-3xl font-semibold tracking-[-0.04em]">
-                    $0.01 test payment
+                    {selectedFlow === "x402"
+                      ? "Agent-paid API request"
+                      : selectedFlow === "push"
+                        ? "Receive a direct transfer"
+                        : selectedFlow === "embedded"
+                          ? "$0.01 embedded payment"
+                          : "$0.01 hosted checkout"}
                   </h2>
-                  {selectedFlow === "embedded" ? null : (
-                    <p className="text-sm leading-7 text-[var(--ink-soft)]">
-                      {selectedFlow === "hosted"
-                        ? "Create the hosted checkout and open it when you are ready."
-                        : selectedFlow === "headless"
-                          ? "Let the server signer handle the payment with no browser wallet handoff."
-                          : "Generate a direct BTC or ETH payment request for the same amount."}
+                  <p className="text-sm leading-7 text-[var(--ink-soft)]">
+                    {selectedFlow === "hosted"
+                      ? "Create a secure Coinbase-hosted payment link."
+                      : selectedFlow === "embedded"
+                        ? "Sign in, top up, and pay from a self-custodial wallet without leaving the product."
+                        : selectedFlow === "x402"
+                          ? "See the full HTTP payment handshake. This simulator never signs a wallet or moves funds."
+                          : selectedFlow === "agent"
+                            ? "Create a signed Base USDC invoice, then chat with the agent to inspect and pay it under policy."
+                            : "Create a wallet-native address for a direct BTC or ETH transfer."}
+                  </p>
+                </div>
+
+                <div className="workspace-context">
+                  <span>
+                    {selectedFlow === "x402"
+                      ? "Simulation"
+                      : environmentLabels[environment]}
+                  </span>
+                  {selectedFlow in publicModeDocs ? (
+                    <a
+                      href={publicModeDocs[selectedFlow as PublicDemoFlow].href}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {publicModeDocs[selectedFlow as PublicDemoFlow].label}
+                      <CdsIcon name="externalLink" size={12} />
+                    </a>
+                  ) : null}
+                </div>
+              </div>
+
+              {selectedFlow === "embedded" ? (
+                <div className="embedded-wallet-slot">
+                  {embeddedWalletConfig.projectId ? (
+                    <EmbeddedWalletPanel config={embeddedWalletConfig} variant="compact" />
+                  ) : (
+                    <p className="text-sm text-[var(--ink-soft)]">
+                      Add <span className="font-mono">NEXT_PUBLIC_CDP_PROJECT_ID</span> to enable wallet sign-in.
                     </p>
                   )}
                 </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <span className="rounded-full border border-[var(--line)] bg-[#f7f9ff] px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
-                    {environmentLabels[environment]}
-                  </span>
-                  <span className="rounded-full border border-[var(--line)] bg-[#f7f9ff] px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
-                    {selectedFlowTitle}
-                  </span>
-                </div>
-              </div>
+              ) : null}
 
               {selectedFlow === "push" ? (
                 <div className="mt-6 flex flex-wrap gap-3">
                   {pushAssetOptions.map((asset) => (
                     <button
                       key={asset}
-                      className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${
-                        pushAsset === asset
-                          ? "border-[var(--accent-strong)] bg-[var(--accent-strong)] text-white shadow-[0_10px_35px_rgba(54,103,255,0.24)]"
-                          : "border-[var(--line)] bg-white text-[var(--foreground)] hover:border-[var(--accent-strong)] hover:shadow-[0_10px_30px_rgba(54,103,255,0.14)]"
-                      }`}
+                      className={`cds-selector ${pushAsset === asset ? "is-active" : ""}`}
                       onClick={() => {
                         setPushAsset(asset);
                         setPushNetwork(
@@ -2663,11 +3280,7 @@ export function CoinbaseDemo({
                     ? ethNetworkOptions.map((option) => (
                         <button
                           key={option.network}
-                          className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${
-                            pushNetwork === option.network
-                              ? "border-[var(--accent-strong)] bg-[var(--accent-strong)] text-white shadow-[0_10px_35px_rgba(54,103,255,0.24)]"
-                              : "border-[var(--line)] bg-white text-[var(--foreground)] hover:border-[var(--accent-strong)] hover:shadow-[0_10px_30px_rgba(54,103,255,0.14)]"
-                          }`}
+                          className={`cds-selector ${pushNetwork === option.network ? "is-active" : ""}`}
                           onClick={() => setPushNetwork(option.network)}
                           type="button"
                         >
@@ -2678,7 +3291,7 @@ export function CoinbaseDemo({
                 </div>
               ) : null}
 
-              {selectedFlow === "embedded" ? (
+              {selectedFlow === "embedded" && embeddedWalletReady ? (
                 <EmbeddedFundingControls
                   balances={embeddedWalletBalances}
                   fundingAsset={embeddedFundingAsset}
@@ -2696,11 +3309,47 @@ export function CoinbaseDemo({
                 />
               ) : null}
 
-              <div className="mt-6 rounded-[1.5rem] border border-[var(--line)] bg-[#f7f9ff] px-5 py-5">
+              {selectedFlow === "agent" ? (
+                <AgentChatPanel
+                  checkout={agentCheckout}
+                  input={agentChatInput}
+                  isRunning={agentChatRunning}
+                  messages={agentChatMessages}
+                  onInputChange={setAgentChatInput}
+                  onPayCurrentCheckout={() => {
+                    if (agentCheckout) {
+                      void submitAgentChatMessage(
+                        `Pay ${agentCheckout.checkoutUrl}`,
+                        true,
+                      );
+                    }
+                  }}
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void submitAgentChatMessage(agentChatInput);
+                  }}
+                />
+              ) : null}
+
+              {selectedFlow === "x402" ? (
+                <div className="x402-code-card">
+                  <div className="x402-code-head">
+                    <span>client.ts</span>
+                    <span>@x402/fetch</span>
+                  </div>
+                  <pre>
+                    <code>{X402_CLIENT_SNIPPET}</code>
+                  </pre>
+                </div>
+              ) : null}
+
+              <div className="payment-line-item">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <p className="text-sm font-semibold text-[var(--foreground)]">
-                      {TEST_CART.title}
+                      {selectedFlow === "x402"
+                        ? "GET /api/x402/weather"
+                        : TEST_CART.title}
                     </p>
                     {TEST_CART.caption ? (
                       <p className="mt-1 text-sm text-[var(--ink-soft)]">
@@ -2709,17 +3358,24 @@ export function CoinbaseDemo({
                     ) : null}
                   </div>
                   <p className="text-lg font-semibold text-[var(--foreground)]">
-                    {formatAmount(TEST_CART.unitAmount)}
+                    {selectedFlow === "x402"
+                      ? "$0.001"
+                      : formatAmount(TEST_CART.unitAmount)}
                   </p>
                 </div>
               </div>
 
-              <MetadataFieldsEditor
-                fields={metadataFields}
-                onAdd={addMetadataField}
-                onRemove={removeMetadataField}
-                onUpdate={updateMetadataField}
-              />
+              {selectedFlow === "x402" ? null : (
+                <details className="advanced-fields">
+                  <summary>Optional metadata</summary>
+                  <MetadataFieldsEditor
+                    fields={metadataFields}
+                    onAdd={addMetadataField}
+                    onRemove={removeMetadataField}
+                    onUpdate={updateMetadataField}
+                  />
+                </details>
+              )}
 
               <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
                 <div>
@@ -2727,32 +3383,46 @@ export function CoinbaseDemo({
                     Total
                   </p>
                   <p className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-[var(--foreground)]">
-                    {formatAmount(totalAmount, selectedFlow === "push" ? "USD" : "USDC")}
+                    {selectedFlow === "x402"
+                      ? "0.001 USDC"
+                      : formatAmount(
+                          totalAmount,
+                          selectedFlow === "push" ? "USD" : "USDC",
+                        )}
                   </p>
                 </div>
 
                 <button
-                  className="rounded-full bg-[var(--accent-strong)] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent)] hover:shadow-[0_14px_44px_rgba(54,103,255,0.28)] disabled:cursor-not-allowed disabled:opacity-60"
+                  aria-busy={selectedActionLoading}
+                  className="cds-button cds-button-primary"
                   disabled={selectedActionDisabled}
                   onClick={() => void handleSelectedFlowAction()}
                   type="button"
                 >
                   {actionLabel}
+                  <CdsIcon name="forwardArrow" size={16} />
                 </button>
               </div>
 
               {currentErrorMessage ? (
-                <div className="mt-5 rounded-[1.5rem] border border-[#efc8c3] bg-[#fbefed] px-4 py-3 text-sm leading-6 text-[#8f352d]">
+                <div className="cds-feedback cds-feedback-negative mt-5">
                   {currentErrorMessage}
                 </div>
               ) : null}
+              </div>
             </div>
 
-            {receiptCard ? (
-              <div className="rounded-[2rem] border border-[var(--line)] bg-white/86 p-6 shadow-[0_18px_50px_rgba(54,103,255,0.12)]">
-                {receiptCard}
+            {hasLiveOutput ? <aside className="workspace-aside">
+              <div className="workspace-aside-label">
+                <span>Live output</span>
+                <span>{selectedFlowTitle}</span>
               </div>
-            ) : null}
+              {receiptCard ? (
+                <div className="workspace-card p-6 sm:p-8">
+                {receiptCard}
+                </div>
+              ) : null}
+            </aside> : null}
           </div>
         </section>
       ) : null}

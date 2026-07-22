@@ -7,15 +7,7 @@ const configDirectory = path.dirname(fileURLToPath(import.meta.url));
 const x402FetchStubPath = path.join(configDirectory, "app/lib/cdp/x402-fetch-stub.ts");
 
 const nextConfig: NextConfig = {
-  images: {
-    remotePatterns: [
-      {
-        hostname: "api.qrserver.com",
-        pathname: "/v1/create-qr-code/",
-        protocol: "https",
-      },
-    ],
-  },
+  allowedDevOrigins: ["192.168.0.160"],
   turbopack: {
     root: configDirectory,
     resolveAlias: {

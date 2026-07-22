@@ -8,14 +8,17 @@
     "start": "next start",
     "lint": "eslint",
     "coinbase:headless-pay": "node scripts/coinbase-headless-payment.mjs",
+    "imessage:payment-demo": "node scripts/imessage-payment-demo.mjs",
     "coinbase:webhook": "node scripts/coinbase-webhook-subscription.mjs"
   },
   "dependencies": {
     "@coinbase/cdp-core": "^0.0.100",
     "@coinbase/cdp-hooks": "^0.0.100",
     "@coinbase/cdp-react": "^0.0.100",
+    "@coinbase/cds-icons": "5.21.0",
     "next": "16.2.1",
     "postgres": "^3.4.9",
+    "qrcode": "^1.5.4",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "viem": "^2.48.1"
@@ -23,6 +26,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",

@@ -10,6 +10,7 @@ import {
   deserializeReceiptContext,
   getReceiptCookieName,
 } from "@/app/lib/receipt-context";
+import { CdsIcon } from "@/components/cds-icon";
 
 type PaymentResultPageProps = {
   searchParams: Promise<{
@@ -20,13 +21,13 @@ type PaymentResultPageProps = {
 };
 
 const statusStyles: Record<string, string> = {
-  ACTIVE: "bg-[#e5edff] text-[#3155c4]",
-  COMPLETED: "bg-[#e8f7f3] text-[#1b7f63]",
-  DEACTIVATED: "bg-[#edf1f7] text-[#55627a]",
-  EXPIRED: "bg-[#fff1dd] text-[#99631a]",
-  FAILED: "bg-[#ffe9e7] text-[#a44038]",
-  PROCESSING: "bg-[#e9f0ff] text-[#345ecc]",
-  SUCCESS: "bg-[#e8f7f3] text-[#1b7f63]",
+  ACTIVE: "cds-status cds-status-primary",
+  COMPLETED: "cds-status cds-status-positive",
+  DEACTIVATED: "cds-status cds-status-neutral",
+  EXPIRED: "cds-status cds-status-warning",
+  FAILED: "cds-status cds-status-negative",
+  PROCESSING: "cds-status cds-status-primary",
+  SUCCESS: "cds-status cds-status-positive",
 };
 
 function isEnvironment(value?: string): value is CheckoutEnvironment {
@@ -34,7 +35,7 @@ function isEnvironment(value?: string): value is CheckoutEnvironment {
 }
 
 function getStatusStyle(status: string) {
-  return statusStyles[status] ?? "bg-[#efefea] text-[#4a4a45]";
+  return statusStyles[status] ?? "cds-status cds-status-neutral";
 }
 
 function getStatusCopy(status?: string) {
@@ -111,6 +112,7 @@ function ReceiptRow({
             target="_blank"
           >
             {value}
+            <CdsIcon className="ml-2" name="externalLink" size={12} />
           </a>
         ) : (
           value
@@ -163,7 +165,7 @@ export default async function PaymentResultPage({
   const noteValue = metadata.note?.trim() ? metadata.note : "None";
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-5xl flex-col justify-center px-6 py-16 lg:px-10">
+    <main className="receipt-page mx-auto flex min-h-screen w-full max-w-5xl flex-col justify-center px-6 py-16 lg:px-10">
       <section className="glass-panel rounded-[2rem] p-8 sm:p-10">
         <div className="flex flex-col gap-6 border-b border-[var(--line)] pb-8 lg:flex-row lg:items-start lg:justify-between">
           <div className="max-w-3xl">
@@ -175,7 +177,7 @@ export default async function PaymentResultPage({
               {copy.body}
             </p>
           </div>
-          <div className="rounded-[1.5rem] border border-[var(--line)] bg-white/80 px-5 py-4 text-right">
+          <div className="receipt-surface rounded-[1.5rem] px-5 py-4 text-right">
             <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--ink-soft)]">
               Receipt ID
             </p>
@@ -186,7 +188,7 @@ export default async function PaymentResultPage({
         </div>
 
         <div className="mt-8 grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-          <section className="rounded-[1.75rem] border border-[var(--line)] bg-white/82 p-6 shadow-[0_18px_50px_rgba(54,103,255,0.08)] sm:p-7">
+          <section className="receipt-surface rounded-[1.75rem] p-6 sm:p-7">
             <div className="flex flex-col gap-4 border-b border-[var(--line)] pb-6 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--ink-soft)]">
@@ -197,7 +199,7 @@ export default async function PaymentResultPage({
                 </p>
               </div>
               <span
-                className={`inline-flex w-fit rounded-full px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] ${getStatusStyle(displayStatus)}`}
+                className={getStatusStyle(displayStatus)}
               >
                 {displayStatus}
               </span>
@@ -231,21 +233,21 @@ export default async function PaymentResultPage({
             </dl>
 
             {checkoutError ? (
-              <div className="mt-6 rounded-[1.25rem] border border-[#efc8c3] bg-[#fbefed] px-4 py-3 text-sm leading-6 text-[#8f352d]">
+              <div className="cds-feedback cds-feedback-negative mt-6">
                 {checkoutError}
               </div>
             ) : null}
           </section>
 
           <div className="space-y-6">
-            <section className="rounded-[1.75rem] border border-[var(--line)] bg-white/78 p-6 sm:p-7">
+            <section className="receipt-surface rounded-[1.75rem] p-6 sm:p-7">
               <p className="eyebrow">Receipt metadata</p>
               {metadataEntries.length > 0 ? (
                 <dl className="mt-5 space-y-4">
                   {metadataEntries.map(([key, value]) => (
                     <div
                       key={key}
-                      className="rounded-[1.25rem] border border-[var(--line)] bg-[#f8fbff] px-4 py-3"
+                      className="receipt-metadata-row rounded-[1.25rem] px-4 py-3"
                     >
                       <dt className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
                         {formatLabel(key)}
@@ -263,23 +265,25 @@ export default async function PaymentResultPage({
               )}
             </section>
 
-            <section className="rounded-[1.75rem] border border-[var(--line)] bg-white/78 p-6 sm:p-7">
+            <section className="receipt-surface rounded-[1.75rem] p-6 sm:p-7">
               <p className="eyebrow">Actions</p>
               <div className="mt-5 flex flex-wrap gap-3">
                 <Link
-                  className="inline-flex items-center rounded-full bg-[var(--accent-strong)] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent)] hover:shadow-[0_14px_44px_rgba(54,103,255,0.28)]"
+                  className="cds-button cds-button-primary"
                   href="/"
                 >
+                  <CdsIcon name="arrowLeft" size={16} />
                   Back to demo
                 </Link>
                 {checkoutUrl ? (
                   <a
-                    className="inline-flex items-center rounded-full border border-[var(--line)] bg-white px-6 py-3 text-sm font-semibold text-[var(--foreground)] transition hover:border-[var(--accent)] hover:text-[var(--accent-strong)]"
+                    className="cds-button cds-button-secondary"
                     href={checkoutUrl}
                     rel="noreferrer"
                     target="_blank"
                   >
                     Open payment link
+                    <CdsIcon name="externalLink" size={16} />
                   </a>
                 ) : null}
               </div>

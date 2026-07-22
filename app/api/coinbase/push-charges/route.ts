@@ -84,7 +84,7 @@ export async function POST(request: Request) {
 
     if (typeof body.reference !== "string" || !body.reference.trim()) {
       return NextResponse.json(
-        { error: "Reference is required for push payments." },
+        { error: "Reference is required for direct transfers." },
         { status: 400 },
       );
     }

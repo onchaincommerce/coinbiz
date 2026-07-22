@@ -1,10 +1,18 @@
 import type { Metadata } from "next";
+import { Inter } from "next/font/google";
+import "@coinbase/cds-icons/fonts/web/icon-font.css";
 import "./globals.css";
 
+const inter = Inter({
+  display: "swap",
+  subsets: ["latin"],
+  variable: "--font-inter",
+});
+
 export const metadata: Metadata = {
-  title: "Coinbase Business API Demo",
+  title: "CoinBiz — Payments for Every Interface",
   description:
-    "Sandbox and live Coinbase Business hosted checkouts with a webhook server feed.",
+    "Explore hosted and embedded Coinbase Business checkouts, direct transfers, and an HTTP-native x402 protocol simulation.",
 };
 
 export default function RootLayout({
@@ -13,7 +21,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="h-full antialiased">
+    <html lang="en" className={`${inter.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );

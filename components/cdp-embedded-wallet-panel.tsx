@@ -1,6 +1,8 @@
 "use client";
 
+import Image from "next/image";
 import { Component, type ErrorInfo, useEffect, useMemo, useState } from "react";
+import QRCode from "qrcode";
 
 import { CDPReactProvider, type Config as CDPReactConfig } from "@coinbase/cdp-react";
 import {
@@ -18,6 +20,7 @@ import {
   EMBEDDED_WALLET_STATE_EVENT,
   type EmbeddedWalletSessionState,
 } from "@/app/lib/cdp/embedded-wallet-state";
+import { CdsIcon } from "@/components/cds-icon";
 
 export type EmbeddedWalletPanelConfig = {
   appLogoUrl?: string;
@@ -82,11 +85,11 @@ function EmbeddedWalletErrorCard(props: {
       : "max-w-xl text-sm leading-6 text-slate-600";
   const cardClassName =
     props.variant === "compact"
-      ? "rounded-[1.25rem] border border-[var(--line)] bg-white/78 px-4 py-4"
+      ? "cds-elevation-card rounded-[1.25rem] px-4 py-4"
       : "rounded-3xl border border-slate-200 bg-white/88 p-5";
   const errorMessageClassName =
     props.variant === "compact"
-      ? "rounded-[1.25rem] bg-[#fbefed] px-4 py-3 text-sm text-[#8f352d]"
+      ? "cds-feedback cds-feedback-negative"
       : "rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700 ring-1 ring-rose-100";
 
   return (
@@ -177,12 +180,15 @@ function EmbeddedWalletPanelInner({
   const { verifyEmailOTP } = useVerifyEmailOTP();
   const [authError, setAuthError] = useState<string | null>(null);
   const [authStatus, setAuthStatus] = useState<string | null>(null);
+  const [addressCopied, setAddressCopied] = useState(false);
   const [email, setEmail] = useState("");
   const [flowId, setFlowId] = useState<string | null>(null);
   const [hasProvisionedWallet, setHasProvisionedWallet] = useState(false);
   const [initTimedOut, setInitTimedOut] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [otp, setOtp] = useState("");
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [showTopUp, setShowTopUp] = useState(false);
   const origin = useOrigin();
   const userEmail = currentUser?.authenticationMethods.email?.email ?? null;
   const titleClassName =
@@ -195,35 +201,35 @@ function EmbeddedWalletPanelInner({
       : "max-w-xl text-sm leading-6 text-slate-600";
   const inputClassName =
     variant === "compact"
-      ? "w-full rounded-[1.25rem] border border-[var(--line)] bg-white px-4 py-3 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--accent)]"
+      ? "cds-control w-full"
       : "w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-400 focus:ring-4 focus:ring-blue-100";
   const primaryButtonClassName =
     variant === "compact"
-      ? "rounded-full bg-[var(--accent-strong)] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent)] hover:shadow-[0_14px_44px_rgba(54,103,255,0.28)] disabled:cursor-not-allowed disabled:opacity-60"
+      ? "cds-button cds-button-primary"
       : "inline-flex min-h-12 items-center justify-center rounded-full bg-slate-950 px-5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60";
   const secondaryButtonClassName =
     variant === "compact"
-      ? "rounded-full border border-[var(--line)] px-5 py-3 text-sm font-semibold text-[var(--ink-soft)] transition hover:border-[var(--foreground)] hover:text-[var(--foreground)]"
+      ? "cds-button cds-button-secondary"
       : "inline-flex min-h-12 items-center justify-center rounded-full border border-slate-200 bg-white px-5 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50";
   const cardClassName =
     variant === "compact"
-      ? "rounded-[1.25rem] border border-[var(--line)] bg-white/78 px-4 py-4"
+      ? "cds-elevation-card rounded-[1.25rem] px-4 py-4"
       : "rounded-3xl border border-slate-200 bg-white/88 p-5";
   const subtleCardClassName =
     variant === "compact"
-      ? "rounded-[1.25rem] border border-[var(--line)] bg-white/78 px-4 py-4 text-sm leading-7 text-[var(--ink-soft)]"
+      ? "cds-elevation-card rounded-[1.25rem] px-4 py-4 text-sm leading-7 text-[var(--ink-soft)]"
       : "rounded-3xl border border-slate-200 bg-white/80 p-4 text-sm text-slate-600";
   const successBadgeClassName =
     variant === "compact"
-      ? "rounded-full bg-[#e8f7f3] px-3 py-1 text-xs font-semibold text-[#1b7f63]"
+      ? "cds-status cds-status-positive"
       : "inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200";
   const successMessageClassName =
     variant === "compact"
-      ? "rounded-[1.25rem] bg-[#e8f7f3] px-4 py-3 text-sm text-[#1b7f63]"
+      ? "cds-feedback cds-feedback-positive"
       : "rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700 ring-1 ring-emerald-100";
   const errorMessageClassName =
     variant === "compact"
-      ? "rounded-[1.25rem] bg-[#fbefed] px-4 py-3 text-sm text-[#8f352d]"
+      ? "cds-feedback cds-feedback-negative"
       : "rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700 ring-1 ring-rose-100";
 
   useEffect(() => {
@@ -367,10 +373,54 @@ function EmbeddedWalletPanelInner({
       setFlowId(null);
       setOtp("");
       setHasProvisionedWallet(false);
+      setAddressCopied(false);
+      setQrDataUrl(null);
+      setShowTopUp(false);
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : "Unable to sign out.");
     } finally {
       setIsSubmitting(false);
+    }
+  }
+
+  async function handleCopyAddress() {
+    if (!evmAddress) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(evmAddress);
+      setAddressCopied(true);
+      window.setTimeout(() => setAddressCopied(false), 1800);
+    } catch {
+      setAuthError("Unable to copy the wallet address. Select it manually instead.");
+    }
+  }
+
+  async function handleToggleTopUp() {
+    if (!evmAddress) {
+      return;
+    }
+
+    if (showTopUp) {
+      setShowTopUp(false);
+      return;
+    }
+
+    try {
+      setAuthError(null);
+      if (!qrDataUrl) {
+        setQrDataUrl(
+          await QRCode.toDataURL(evmAddress, {
+            errorCorrectionLevel: "M",
+            margin: 1,
+            width: 384,
+          }),
+        );
+      }
+      setShowTopUp(true);
+    } catch {
+      setAuthError("Unable to generate the wallet QR code.");
     }
   }
 
@@ -392,9 +442,12 @@ function EmbeddedWalletPanelInner({
 
     if (variant === "compact") {
       return (
-        <div className="space-y-3">
-          <div className="h-5 w-28 animate-pulse rounded-full bg-white/60" />
-          <div className="h-12 animate-pulse rounded-[1.25rem] bg-white/60" />
+        <div className="embedded-wallet-heading" aria-busy="true">
+          <span className="wallet-status-orb" aria-hidden="true" />
+          <div>
+            <strong>Connecting wallet</strong>
+            <small>Starting a secure session…</small>
+          </div>
         </div>
       );
     }
@@ -439,21 +492,152 @@ function EmbeddedWalletPanelInner({
     );
   }
 
+  if (variant === "compact") {
+    return (
+      <div className="embedded-wallet-compact">
+        {!isSignedIn ? (
+          <>
+            <div className="embedded-wallet-heading">
+              <span className="wallet-status-orb" aria-hidden="true" />
+              <div>
+                <strong>Embedded wallet</strong>
+                <small>Email-secured · No extension</small>
+              </div>
+            </div>
+
+            {!flowId ? (
+              <form className="wallet-inline-form" onSubmit={handleEmailSubmit}>
+                <label className="sr-only" htmlFor="wallet-email-compact">
+                  Email address
+                </label>
+                <input
+                  id="wallet-email-compact"
+                  autoComplete="email"
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="you@company.com"
+                  type="email"
+                  value={email}
+                />
+                <button disabled={isSubmitting} type="submit">
+                  {isSubmitting ? "Sending…" : "Continue"}
+                </button>
+              </form>
+            ) : (
+              <form className="wallet-inline-form" onSubmit={handleOtpSubmit}>
+                <label className="sr-only" htmlFor="wallet-otp-compact">
+                  One-time password
+                </label>
+                <input
+                  id="wallet-otp-compact"
+                  inputMode="numeric"
+                  maxLength={6}
+                  onChange={(event) => setOtp(event.target.value.replace(/\D/g, ""))}
+                  placeholder="6-digit code"
+                  type="text"
+                  value={otp}
+                />
+                <button
+                  disabled={isSubmitting || otp.trim().length !== 6}
+                  type="submit"
+                >
+                  {isSubmitting ? "Verifying…" : "Verify"}
+                </button>
+                <button
+                  className="wallet-text-action"
+                  onClick={() => {
+                    setFlowId(null);
+                    setOtp("");
+                    setAuthError(null);
+                    setAuthStatus(null);
+                  }}
+                  type="button"
+                >
+                  Back
+                </button>
+              </form>
+            )}
+          </>
+        ) : (
+          <>
+            <div className="wallet-ready-line">
+              <span className="wallet-status-orb is-ready" aria-hidden="true" />
+              <div>
+                <strong>{userEmail ?? "Wallet ready"}</strong>
+                <small>
+                  {evmAddress
+                    ? `${evmAddress.slice(0, 8)}…${evmAddress.slice(-6)}`
+                    : "Preparing Base address"}
+                </small>
+              </div>
+              <div className="wallet-ready-actions">
+                <button
+                  className="wallet-utility-action"
+                  disabled={!evmAddress}
+                  onClick={() => void handleCopyAddress()}
+                  type="button"
+                >
+                  <CdsIcon name="copy" size={12} />
+                  {addressCopied ? "Copied" : "Copy"}
+                </button>
+                <button
+                  aria-expanded={showTopUp}
+                  className="wallet-utility-action"
+                  disabled={!evmAddress}
+                  onClick={() => void handleToggleTopUp()}
+                  type="button"
+                >
+                  <CdsIcon name="qrCode" size={12} />
+                  {showTopUp ? "Close QR" : "Top up"}
+                </button>
+                <button
+                  className="wallet-text-action"
+                  disabled={isSubmitting}
+                  onClick={() => void handleSignOut()}
+                  type="button"
+                >
+                  {isSubmitting ? "Signing out…" : "Sign out"}
+                </button>
+              </div>
+            </div>
+
+            {showTopUp && evmAddress && qrDataUrl ? (
+              <div className="wallet-topup-panel">
+                <Image
+                  alt="QR code for the embedded Base wallet address"
+                  height={176}
+                  src={qrDataUrl}
+                  unoptimized
+                  width={176}
+                />
+                <div>
+                  <span>Fund from your phone</span>
+                  <strong>Send USDC or ETH on Base</strong>
+                  <code>{evmAddress}</code>
+                  <button onClick={() => void handleCopyAddress()} type="button">
+                    <CdsIcon name="copy" size={12} />
+                    {addressCopied ? "Address copied" : "Copy full address"}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </>
+        )}
+
+        {authStatus ? <p className="wallet-message is-success">{authStatus}</p> : null}
+        {authError ? <p className="wallet-message is-error">{authError}</p> : null}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className="space-y-2">
         <p className="eyebrow">Embedded Wallet</p>
-        <h2 className={titleClassName}>
-          {variant === "compact"
-            ? "Sign in to pay"
-            : "Email OTP inside your brand shell"}
-        </h2>
-        {variant === "compact" ? null : (
-          <p className={bodyClassName}>
-            This pane uses Coinbase Embedded Wallets. No extension, no redirect,
-            no hosted checkout handoff.
-          </p>
-        )}
+        <h2 className={titleClassName}>Email OTP inside your brand shell</h2>
+        <p className={bodyClassName}>
+          This pane uses Coinbase Embedded Wallets. No extension, no redirect,
+          no hosted checkout handoff.
+        </p>
       </div>
 
       {!isSignedIn ? (
@@ -478,8 +662,7 @@ function EmbeddedWalletPanelInner({
               <button
                 className={cn(
                   primaryButtonClassName,
-                  variant === "default" &&
-                    "inline-flex min-h-12 items-center justify-center",
+                  "inline-flex min-h-12 items-center justify-center",
                 )}
                 disabled={isSubmitting}
                 type="submit"
@@ -514,8 +697,7 @@ function EmbeddedWalletPanelInner({
                 <button
                   className={cn(
                     primaryButtonClassName,
-                    variant === "default" &&
-                      "inline-flex min-h-12 items-center justify-center",
+                    "inline-flex min-h-12 items-center justify-center",
                   )}
                   disabled={isSubmitting || otp.trim().length !== 6}
                   type="submit"
@@ -525,8 +707,7 @@ function EmbeddedWalletPanelInner({
                 <button
                   className={cn(
                     secondaryButtonClassName,
-                    variant === "default" &&
-                      "inline-flex min-h-12 items-center justify-center bg-white",
+                    "inline-flex min-h-12 items-center justify-center bg-white",
                   )}
                   onClick={() => {
                     setFlowId(null);
@@ -542,71 +723,44 @@ function EmbeddedWalletPanelInner({
             </form>
           )}
 
-          {variant === "compact" ? null : (
-            <div className={subtleCardClassName}>
-              The embedded wallet remains user-custodied. Your app gets embedded
-              wallet UX, but it does not get the user’s private key.
-            </div>
-          )}
+          <div className={subtleCardClassName}>
+            The embedded wallet remains user-custodied. Your app gets embedded
+            wallet UX, but it does not get the user’s private key.
+          </div>
         </div>
       ) : (
         <div className="space-y-4">
-          {variant === "compact" ? (
+          <div className="grid gap-4 md:grid-cols-2">
             <div className={cardClassName}>
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="eyebrow">Wallet Ready</p>
-                  <p className="mt-3 break-all font-mono text-sm text-[var(--foreground)]">
-                    {userEmail ?? "Email verified"}
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    className={secondaryButtonClassName}
-                    disabled={isSubmitting}
-                    onClick={() => void handleSignOut()}
-                    type="button"
-                  >
-                    {isSubmitting ? "Signing out..." : "Sign out"}
-                  </button>
-                </div>
-              </div>
+              <p className="eyebrow">Wallet Status</p>
+              <p className="mt-3 text-sm text-[var(--ink-soft)]">Email</p>
+              <p className="mt-1 break-all font-mono text-sm text-[var(--foreground)]">
+                {userEmail ?? "Email verified"}
+              </p>
             </div>
-          ) : (
-            <>
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className={cardClassName}>
-                  <p className="eyebrow">Wallet Status</p>
-                  <p className="mt-3 text-sm text-[var(--ink-soft)]">Email</p>
-                  <p className="mt-1 break-all font-mono text-sm text-[var(--foreground)]">
-                    {userEmail ?? "Email verified"}
-                  </p>
-                </div>
-                <div className={cardClassName}>
-                  <p className="eyebrow">Identity</p>
-                  <p className="mt-3 text-sm text-[var(--ink-soft)]">User ID</p>
-                  <p className="mt-1 break-all font-mono text-sm text-[var(--foreground)]">
-                    {currentUser?.userId ?? "Authenticated"}
-                  </p>
-                </div>
-              </div>
+            <div className={cardClassName}>
+              <p className="eyebrow">Identity</p>
+              <p className="mt-3 text-sm text-[var(--ink-soft)]">User ID</p>
+              <p className="mt-1 break-all font-mono text-sm text-[var(--foreground)]">
+                {currentUser?.userId ?? "Authenticated"}
+              </p>
+            </div>
+          </div>
 
-              <div className="flex flex-wrap items-center gap-3">
-                <span className={successBadgeClassName}>Signed in without redirect</span>
-                <button
-                  className={cn(
-                    secondaryButtonClassName,
-                    "inline-flex min-h-12 items-center justify-center bg-white",
-                  )}
-                  disabled={isSubmitting}
-                  onClick={() => void handleSignOut()}
-                  type="button"
-                >
-                  {isSubmitting ? "Signing out..." : "Sign out"}
-                </button>
-              </div>
-            </>
-          )}
+          <div className="flex flex-wrap items-center gap-3">
+            <span className={successBadgeClassName}>Signed in without redirect</span>
+            <button
+              className={cn(
+                secondaryButtonClassName,
+                "inline-flex min-h-12 items-center justify-center bg-white",
+              )}
+              disabled={isSubmitting}
+              onClick={() => void handleSignOut()}
+              type="button"
+            >
+              {isSubmitting ? "Signing out..." : "Sign out"}
+            </button>
+          </div>
         </div>
       )}
 

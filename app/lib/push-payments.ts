@@ -351,11 +351,7 @@ function buildChargeView(input: {
 
 export async function createPushCharge(input: CreatePushChargeInput) {
   if (input.environment !== "live") {
-    throw new Error("Push payments are only available in live mode.");
-  }
-
-  if (input.metadata.mode !== "donation") {
-    throw new Error("Push payments are only available for donation flow.");
+    throw new Error("Direct transfers are only available in live mode.");
   }
 
   const config = getPushAssetConfig(input.asset);
