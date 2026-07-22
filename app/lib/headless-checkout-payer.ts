@@ -503,6 +503,9 @@ export async function startAgenticCheckoutPayment(
   const checkout = await getCheckout(checkoutId, "live");
   const hostedCheckoutId = extractHostedPaymentLinkId(input.checkoutUrl ?? checkout.url);
   const amountCap = getConfiguredMaxUsdc();
+  const hasExternalSignature =
+    Boolean(input.signature?.trim()) && Boolean(input.payerAddress?.trim());
+  const usesAutonomousServerPayer = !input.dryRun && !hasExternalSignature;
 
   if (input.checkoutUrl?.trim()) {
     const providedHostedCheckoutId = extractHostedPaymentLinkId(input.checkoutUrl);
@@ -513,8 +516,9 @@ export async function startAgenticCheckoutPayment(
   }
 
   if (
+    usesAutonomousServerPayer &&
     Number.parseFloat(normalizeAmount(checkout.amount)) >
-    Number.parseFloat(amountCap)
+      Number.parseFloat(amountCap)
   ) {
     throw new Error(
       `Checkout amount ${checkout.amount} exceeds ${HEADLESS_CHECKOUT_MAX_USDC}=${amountCap}.`,
@@ -557,9 +561,6 @@ export async function startAgenticCheckoutPayment(
 
     return upsertAgentCheckoutPaymentAttempt(failedAttempt);
   }
-
-  const hasExternalSignature =
-    Boolean(input.signature?.trim()) && Boolean(input.payerAddress?.trim());
 
   if (
     !input.dryRun &&
