@@ -81,6 +81,7 @@ type DemoFlow =
   | "x402";
 type PublicDemoFlow = "hosted" | "embedded" | "push" | "x402";
 type EmbeddedFundingAsset = "USDC" | "ETH";
+type CreditAmountPreset = "0.01" | "1" | "10" | "100" | "other";
 type WizardStep = "intro" | "environment" | "flow" | "experience";
 type X402DemoStage =
   | "idle"
@@ -89,6 +90,15 @@ type X402DemoStage =
   | "settling"
   | "complete"
   | "error";
+type X402WorkloadId = "inference" | "gpu";
+
+function isX402DemoRunning(stage: X402DemoStage) {
+  return (
+    stage === "requesting" ||
+    stage === "payment_required" ||
+    stage === "settling"
+  );
+}
 
 function AnimatedLetterWave({
   startIndex = 0,
@@ -142,6 +152,40 @@ type X402Exchange = {
   detail: string;
   label: string;
   status: string;
+};
+
+type X402ComputeResponse =
+  | {
+      result: {
+        inputTokens: number;
+        latencyMs: number;
+        model: string;
+        output: string;
+        outputTokens: number;
+      };
+      simulation: boolean;
+      workload: "inference";
+    }
+  | {
+      result: {
+        accelerator: string;
+        durationSeconds: number;
+        leaseId: string;
+        region: string;
+        status: "ready";
+      };
+      simulation: boolean;
+      workload: "gpu";
+    };
+
+type X402WorkloadConfig = {
+  actionLabel: string;
+  description: string;
+  eyebrow: string;
+  priceUsdc: string;
+  specs: Array<{ label: string; value: string }>;
+  title: string;
+  unit: string;
 };
 
 type CreateCheckoutResponse = {
@@ -258,6 +302,14 @@ const TEST_CART: CartItem = {
   unitAmount: 0.01,
 };
 
+const CREDIT_AMOUNT_PRESETS = [
+  { label: "$0.01", value: "0.01" },
+  { label: "$1", value: "1" },
+  { label: "$10", value: "10" },
+  { label: "$100", value: "100" },
+  { label: "Other", value: "other" },
+] satisfies Array<{ label: string; value: CreditAmountPreset }>;
+
 const basePublicClient = createPublicClient({
   chain: base,
   transport: http(BASE_RPC_URL),
@@ -294,8 +346,8 @@ const publicDemoFlows = [
   },
   {
     description:
-      "Charge APIs and agents over native HTTP with a 402 challenge, signed payment, and automatic retry.",
-    eyebrow: "Agents + APIs",
+      "Sell inference and GPU capacity per request with an HTTP 402 quote, payment proof, and automatic retry.",
+    eyebrow: "Inference + GPUs",
     index: "03",
     value: "x402",
   },
@@ -339,13 +391,47 @@ const publicModeIcons = {
   x402: "api",
 } as const;
 
-const X402_CLIENT_SNIPPET = `const paidFetch = wrapFetchWithPayment(fetch, client)
+const X402_WORKLOADS: Record<X402WorkloadId, X402WorkloadConfig> = {
+  inference: {
+    actionLabel: "Run paid inference",
+    description:
+      "Purchase one completion from an open-weight model without an account, subscription, or API key.",
+    eyebrow: "Per completion",
+    priceUsdc: "0.0025",
+    specs: [
+      { label: "Model", value: "Llama 3.3 70B" },
+      { label: "Context", value: "4K tokens" },
+      { label: "Max output", value: "512 tokens" },
+    ],
+    title: "LLM inference",
+    unit: "One generated completion",
+  },
+  gpu: {
+    actionLabel: "Reserve GPU burst",
+    description:
+      "Purchase a short H100 compute window for a burst workload, metered to a fixed duration.",
+    eyebrow: "Per compute window",
+    priceUsdc: "0.0250",
+    specs: [
+      { label: "Accelerator", value: "NVIDIA H100 SXM" },
+      { label: "Duration", value: "60 seconds" },
+      { label: "Region", value: "US East" },
+    ],
+    title: "GPU burst rental",
+    unit: "1 GPU · 60-second lease",
+  },
+};
 
-const response = await paidFetch(
-  "/api/x402/weather"
-)
+function getX402ClientSnippet(workload: X402WorkloadId) {
+  return `const paidFetch = wrapFetchWithPayment(fetch, client)
 
-// 402 → sign → retry → 200`;
+const response = await paidFetch("/api/x402/compute", {
+  method: "POST",
+  body: JSON.stringify({ workload: "${workload}" })
+})
+
+// request → 402 quote → pay → retry → compute`;
+}
 
 const pushAssetOptions: PushAsset[] = ["BTC", "ETH"];
 
@@ -402,6 +488,31 @@ const statusStyles: Record<string, string> = {
 function formatAmount(value: number | string, currencyLabel = "USDC") {
   const parsed = typeof value === "number" ? value : Number.parseFloat(value);
   return `${parsed.toFixed(2)} ${currencyLabel}`;
+}
+
+function resolveCreditAmount(
+  preset: CreditAmountPreset,
+  customAmount: string,
+) {
+  const rawAmount = preset === "other" ? customAmount.trim() : preset;
+
+  if (!rawAmount) {
+    return null;
+  }
+
+  const parsedAmount = Number(rawAmount);
+  const amountInCents = Math.round(parsedAmount * 100);
+
+  if (
+    !Number.isFinite(parsedAmount) ||
+    parsedAmount < 0.01 ||
+    parsedAmount > 10_000 ||
+    Math.abs(parsedAmount * 100 - amountInCents) > 0.000001
+  ) {
+    return null;
+  }
+
+  return amountInCents / 100;
 }
 
 function formatStatusLabel(status: string) {
@@ -668,7 +779,7 @@ async function createEmbeddedEthSwapPlan(input: {
     });
   }
 
-  throw new Error("Unable to calculate enough Base ETH to cover the $0.01 checkout.");
+  throw new Error("Unable to calculate enough Base ETH to cover this checkout.");
 }
 
 function buildPushPaymentUri(pushCharge: PushChargeView) {
@@ -767,9 +878,10 @@ function buildCheckoutMetadata(
   flow: DemoFlow,
   customMetadata: Record<string, string>,
   automaticMetadata: Record<string, string> = {},
+  amount = TEST_CART.unitAmount,
 ) {
   return {
-    amount: TEST_CART.unitAmount.toFixed(2),
+    amount: amount.toFixed(2),
     cart: TEST_CART.id,
     flow,
     ...automaticMetadata,
@@ -963,14 +1075,21 @@ function MetadataPreview({
 
 function X402ProtocolPanel({
   exchanges,
+  result,
   stage,
+  workload,
 }: {
   exchanges: X402Exchange[];
+  result: X402ComputeResponse | null;
   stage: X402DemoStage;
+  workload: X402WorkloadId;
 }) {
+  const workloadConfig = X402_WORKLOADS[workload];
   const stageLabel =
     stage === "complete"
-      ? "Resource delivered"
+      ? workload === "inference"
+        ? "Completion delivered"
+        : "Capacity reserved"
       : stage === "error"
         ? "Demo interrupted"
         : stage === "idle"
@@ -981,9 +1100,9 @@ function X402ProtocolPanel({
     <div className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="eyebrow">HTTP exchange</p>
+          <p className="eyebrow">Live protocol trace</p>
           <h3 className="display-font mt-2 text-2xl font-semibold tracking-[-0.04em]">
-            One request. One payment. One retry.
+            Request. Pay. Compute.
           </h3>
         </div>
         <span className="cds-status cds-status-neutral">
@@ -994,8 +1113,9 @@ function X402ProtocolPanel({
       <div className="protocol-log" aria-live="polite">
         {exchanges.length === 0 ? (
           <div className="protocol-log-empty">
-            Run the handshake to watch a client encounter a 402 challenge,
-            attach payment proof, and receive the protected response.
+            Run {workloadConfig.title.toLowerCase()} to watch the client receive
+            an exact USDC quote, attach payment proof, and unlock the compute
+            response.
           </div>
         ) : (
           exchanges.map((exchange, index) => (
@@ -1014,9 +1134,58 @@ function X402ProtocolPanel({
         )}
       </div>
 
+      {result ? (
+        <div className="x402-compute-result" aria-live="polite">
+          <div className="x402-compute-result-head">
+            <div>
+              <p className="eyebrow">
+                {result.workload === "inference" ? "Completion" : "Compute lease"}
+              </p>
+              <h4>
+                {result.workload === "inference"
+                  ? "Inference returned"
+                  : "H100 capacity ready"}
+              </h4>
+            </div>
+            <span className="cds-status cds-status-positive">Delivered</span>
+          </div>
+
+          {result.workload === "inference" ? (
+            <>
+              <p className="x402-inference-output">{result.result.output}</p>
+              <div className="x402-result-metrics">
+                <span>{result.result.model}</span>
+                <span>{result.result.inputTokens} input tokens</span>
+                <span>{result.result.outputTokens} output tokens</span>
+                <span>{result.result.latencyMs}ms</span>
+              </div>
+            </>
+          ) : (
+            <div className="x402-lease-grid">
+              <div>
+                <span>Lease ID</span>
+                <strong>{result.result.leaseId}</strong>
+              </div>
+              <div>
+                <span>Accelerator</span>
+                <strong>{result.result.accelerator}</strong>
+              </div>
+              <div>
+                <span>Window</span>
+                <strong>{result.result.durationSeconds} seconds</strong>
+              </div>
+              <div>
+                <span>Region</span>
+                <strong>{result.result.region}</strong>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : null}
+
       <p className="text-xs leading-5 text-[var(--ink-soft)]">
-        Protocol simulator: this endpoint uses the real x402 HTTP status and
-        headers, but accepts demo proof and moves no funds.
+        Protocol simulator: the endpoint returns a real HTTP 402 challenge and
+        x402 headers. Demo proof is accepted; no wallet signs and no funds move.
       </p>
     </div>
   );
@@ -1367,6 +1536,12 @@ export function CoinbaseDemo({
   );
   const [submittedMetadata, setSubmittedMetadata] =
     useState<Record<string, string> | null>(null);
+  const [creditAmount, setCreditAmount] = useState<number | null>(null);
+  const [creditAmountModalOpen, setCreditAmountModalOpen] = useState(false);
+  const [creditAmountPreset, setCreditAmountPreset] =
+    useState<CreditAmountPreset>("1");
+  const [customCreditAmount, setCustomCreditAmount] = useState("");
+  const [creditAmountError, setCreditAmountError] = useState<string | null>(null);
   const [checkoutCreating, setCheckoutCreating] = useState(false);
   const [checkoutErrorMessage, setCheckoutErrorMessage] = useState<string | null>(
     null,
@@ -1385,6 +1560,10 @@ export function CoinbaseDemo({
   const [agentCreating, setAgentCreating] = useState(false);
   const [x402Stage, setX402Stage] = useState<X402DemoStage>("idle");
   const [x402Exchanges, setX402Exchanges] = useState<X402Exchange[]>([]);
+  const [x402Workload, setX402Workload] =
+    useState<X402WorkloadId>("inference");
+  const [x402Result, setX402Result] =
+    useState<X402ComputeResponse | null>(null);
   const [embeddedWalletSession, setEmbeddedWalletSession] =
     useState<EmbeddedWalletSessionState>({
       email: null,
@@ -1433,7 +1612,15 @@ export function CoinbaseDemo({
     useState<string | null>(null);
   const [demoState, setDemoState] = useState(initialState);
 
-  const totalAmount = TEST_CART.unitAmount;
+  const selectedCreditAmount = resolveCreditAmount(
+    creditAmountPreset,
+    customCreditAmount,
+  );
+  const isCreditFlow = selectedFlow === "hosted" || selectedFlow === "embedded";
+  const totalAmount = isCreditFlow
+    ? (creditAmount ?? TEST_CART.unitAmount)
+    : TEST_CART.unitAmount;
+  const activeX402Workload = X402_WORKLOADS[x402Workload];
   const totalAmountAtomicUsdc = decimalToAtomicUnits(
     totalAmount.toFixed(2),
     USDC_DECIMALS,
@@ -1442,9 +1629,6 @@ export function CoinbaseDemo({
     embeddedWalletSession.isInitialized &&
     embeddedWalletSession.isSignedIn &&
     Boolean(embeddedWalletSession.evmAddress);
-  const embeddedEthSwapReady =
-    embeddedFundingAsset !== "ETH" ||
-    hasEnoughQuotedUsdc(embeddedSwapQuote, totalAmountAtomicUsdc);
   const selectedFlowTitle = selectedFlow ? flowLabels[selectedFlow] : null;
   const liveCheckouts = demoState.checkouts.filter(
     (checkout) => checkout.demoEnvironment === environment,
@@ -1507,6 +1691,24 @@ export function CoinbaseDemo({
     setSelectedFlow(null);
     setEnvironment("sandbox");
   }, []);
+
+  useEffect(() => {
+    if (!creditAmountModalOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !checkoutCreating) {
+        setCreditAmountModalOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [checkoutCreating, creditAmountModalOpen]);
 
   useEffect(() => {
     setEmbeddedWalletSession(
@@ -1919,9 +2121,15 @@ export function CoinbaseDemo({
   function prepareMetadata(
     flow: DemoFlow,
     automaticMetadata: Record<string, string> = {},
+    amount = TEST_CART.unitAmount,
   ) {
     const customMetadata = buildCustomMetadata(metadataFields);
-    const metadata = buildCheckoutMetadata(flow, customMetadata, automaticMetadata);
+    const metadata = buildCheckoutMetadata(
+      flow,
+      customMetadata,
+      automaticMetadata,
+      amount,
+    );
     setSubmittedMetadata(metadata);
 
     return {
@@ -1932,13 +2140,17 @@ export function CoinbaseDemo({
 
   async function createOfficialCheckoutForFlow(
     flow: DemoFlow,
+    amount = TEST_CART.unitAmount,
     automaticMetadata: Record<string, string> = {},
   ) {
-    const { metadata } = prepareMetadata(flow, automaticMetadata);
+    const { metadata } = prepareMetadata(flow, automaticMetadata, amount);
     const response = await fetch("/api/coinbase/checkouts", {
       body: JSON.stringify({
-        amount: totalAmount.toFixed(2),
-        description: `${flowLabels[flow]} · $0.01 test payment`,
+        amount: amount.toFixed(2),
+        description:
+          flow === "hosted" || flow === "embedded"
+            ? `CoinBiz credits · ${formatAmount(amount)}`
+            : `${flowLabels[flow]} · $0.01 test payment`,
         environment,
         metadata,
       }),
@@ -1966,13 +2178,13 @@ export function CoinbaseDemo({
     return data.checkout;
   }
 
-  async function handleCreateHostedCheckout() {
+  async function handleCreateHostedCheckout(amount = totalAmount) {
     try {
       setCheckoutCreating(true);
       resetMessages();
       setEmbeddedWalletAttempt(null);
       setHeadlessAttempt(null);
-      const checkout = await createOfficialCheckoutForFlow("hosted");
+      const checkout = await createOfficialCheckoutForFlow("hosted", amount);
       setTrackedHostedCheckoutId(checkout.id);
     } catch (error) {
       setCheckoutErrorMessage(
@@ -1983,7 +2195,7 @@ export function CoinbaseDemo({
     }
   }
 
-  async function handleCreateEmbeddedCheckout() {
+  async function handleCreateEmbeddedCheckout(amount = totalAmount) {
     if (environment !== "live") {
       setCheckoutErrorMessage("Embedded flow is live-only.");
       return;
@@ -2003,13 +2215,19 @@ export function CoinbaseDemo({
       setHeadlessAttempt(null);
 
       const payerAddress = embeddedWalletSession.evmAddress as `0x${string}`;
+      const paymentAmountAtomicUsdc = decimalToAtomicUnits(
+        amount.toFixed(2),
+        USDC_DECIMALS,
+      );
       let embeddedSwapPlan: EmbeddedSwapPlan | null = null;
 
       if (embeddedFundingAsset === "ETH") {
-        setEmbeddedPaymentPhase("Calculating Base ETH needed for $0.01 USDC...");
+        setEmbeddedPaymentPhase(
+          `Calculating Base ETH needed for ${formatAmount(amount)}...`,
+        );
         embeddedSwapPlan = await createEmbeddedEthSwapPlan({
           account: payerAddress,
-          targetUsdcAtomic: totalAmountAtomicUsdc,
+          targetUsdcAtomic: paymentAmountAtomicUsdc,
         });
         setEmbeddedSwapQuote(toEmbeddedSwapQuoteState(embeddedSwapPlan));
       }
@@ -2031,6 +2249,7 @@ export function CoinbaseDemo({
             };
       const checkout = await createOfficialCheckoutForFlow(
         "embedded",
+        amount,
         fundingMetadata,
       );
       setTrackedEmbeddedWalletCheckoutId(checkout.id);
@@ -2066,7 +2285,7 @@ export function CoinbaseDemo({
           embeddedSwapPlan ??
           (await createEmbeddedEthSwapPlan({
             account: payerAddress,
-            targetUsdcAtomic: totalAmountAtomicUsdc,
+            targetUsdcAtomic: paymentAmountAtomicUsdc,
           }));
 
         setEmbeddedPaymentPhase("Submitting swap transaction...");
@@ -2380,19 +2599,28 @@ export function CoinbaseDemo({
   }
 
   async function handleRunX402Demo() {
+    const workload = X402_WORKLOADS[x402Workload];
+    const requestBody = JSON.stringify({ workload: x402Workload });
+
     try {
       resetMessages();
+      setX402Result(null);
       setX402Stage("requesting");
       setX402Exchanges([
         {
-          detail: "The client requests a paid market signal with ordinary fetch().",
-          label: "GET /api/x402/weather",
-          status: "GET",
+          detail: `The client requests ${workload.unit.toLowerCase()} with an ordinary HTTP call.`,
+          label: `POST /api/x402/compute · ${workload.title}`,
+          status: "POST",
         },
       ]);
 
-      const challengeResponse = await fetch("/api/x402/weather", {
+      const challengeResponse = await fetch("/api/x402/compute", {
+        body: requestBody,
         cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        method: "POST",
       });
       const paymentRequired = challengeResponse.headers.get("payment-required");
 
@@ -2404,9 +2632,8 @@ export function CoinbaseDemo({
       setX402Exchanges((currentExchanges) => [
         ...currentExchanges,
         {
-          detail:
-            "The server returns base64-encoded price, network, asset, and recipient requirements.",
-          label: "PAYMENT-REQUIRED header",
+          detail: `The server quotes exactly ${workload.priceUsdc} USDC on Base Sepolia for this compute unit.`,
+          label: "PAYMENT-REQUIRED · exact price and recipient",
           status: "402",
         },
       ]);
@@ -2416,18 +2643,20 @@ export function CoinbaseDemo({
       setX402Exchanges((currentExchanges) => [
         ...currentExchanges,
         {
-          detail:
-            "An x402 client would sign the accepted requirement and retry the original request.",
-          label: "Retry with PAYMENT-SIGNATURE",
+          detail: `The x402 client authorizes ${workload.priceUsdc} USDC and retries the same request with payment proof.`,
+          label: "PAYMENT-SIGNATURE attached · automatic retry",
           status: "PAY",
         },
       ]);
 
-      const paidResponse = await fetch("/api/x402/weather", {
+      const paidResponse = await fetch("/api/x402/compute", {
+        body: requestBody,
         cache: "no-store",
         headers: {
+          "Content-Type": "application/json",
           "PAYMENT-SIGNATURE": "coinbiz-demo-signature",
         },
+        method: "POST",
       });
       const paymentResponse = paidResponse.headers.get("payment-response");
 
@@ -2435,17 +2664,30 @@ export function CoinbaseDemo({
         throw new Error("The demo payment could not be settled.");
       }
 
+      const computeResponse = (await paidResponse.json()) as X402ComputeResponse;
+
+      if (computeResponse.workload !== x402Workload) {
+        throw new Error("The compute response did not match the requested workload.");
+      }
+
+      setX402Result(computeResponse);
       setX402Stage("complete");
       setX402Exchanges((currentExchanges) => [
         ...currentExchanges,
         {
           detail:
-            "The protected JSON is returned with settlement details in PAYMENT-RESPONSE.",
-          label: "Paid resource delivered",
+            computeResponse.workload === "inference"
+              ? `The completion returns in ${computeResponse.result.latencyMs}ms with settlement details in PAYMENT-RESPONSE.`
+              : `Lease ${computeResponse.result.leaseId} is ready for a ${computeResponse.result.durationSeconds}-second H100 window.`,
+          label:
+            computeResponse.workload === "inference"
+              ? "Inference response delivered"
+              : "GPU capacity reserved",
           status: "200",
         },
       ]);
     } catch (error) {
+      setX402Result(null);
       setX402Stage("error");
       setCheckoutErrorMessage(
         error instanceof Error ? error.message : "Unable to run the x402 demo.",
@@ -2454,6 +2696,8 @@ export function CoinbaseDemo({
   }
 
   function handleBack() {
+    setCreditAmountModalOpen(false);
+
     if (wizardStep === "experience") {
       setWizardStep("intro");
       window.scrollTo({ behavior: "auto", top: 0 });
@@ -2493,6 +2737,7 @@ export function CoinbaseDemo({
 
   function handleSelectFlow(flow: DemoFlow) {
     resetMessages();
+    setCreditAmountModalOpen(false);
     if (!isFlowAvailable(flow)) {
       setEnvironment("live");
     }
@@ -2501,18 +2746,78 @@ export function CoinbaseDemo({
     window.scrollTo({ behavior: "auto", top: 0 });
   }
 
+  function openCreditAmountModal() {
+    resetMessages();
+    setCreditAmountError(null);
+
+    if (creditAmount !== null) {
+      const matchingPreset = CREDIT_AMOUNT_PRESETS.find(
+        (option) =>
+          option.value !== "other" && Number(option.value) === creditAmount,
+      );
+
+      if (matchingPreset) {
+        setCreditAmountPreset(matchingPreset.value);
+      } else {
+        setCreditAmountPreset("other");
+        setCustomCreditAmount(creditAmount.toFixed(2));
+      }
+    }
+
+    setCreditAmountModalOpen(true);
+  }
+
+  async function handleCreditAmountSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (selectedFlow !== "hosted" && selectedFlow !== "embedded") {
+      return;
+    }
+
+    if (selectedCreditAmount === null) {
+      setCreditAmountError(
+        "Enter an amount from $0.01 to $10,000, using no more than two decimals.",
+      );
+      return;
+    }
+
+    const flow = selectedFlow;
+    setCreditAmount(selectedCreditAmount);
+    setCreditAmountError(null);
+    setCreditAmountModalOpen(false);
+
+    if (flow === "hosted") {
+      await handleCreateHostedCheckout(selectedCreditAmount);
+      return;
+    }
+
+    await handleCreateEmbeddedCheckout(selectedCreditAmount);
+  }
+
+  function handleSelectX402Workload(workload: X402WorkloadId) {
+    if (isX402DemoRunning(x402Stage)) {
+      return;
+    }
+
+    resetMessages();
+    setX402Workload(workload);
+    setX402Stage("idle");
+    setX402Exchanges([]);
+    setX402Result(null);
+  }
+
   async function handleSelectedFlowAction() {
     if (!selectedFlow) {
       return;
     }
 
     if (selectedFlow === "hosted") {
-      await handleCreateHostedCheckout();
+      openCreditAmountModal();
       return;
     }
 
     if (selectedFlow === "embedded") {
-      await handleCreateEmbeddedCheckout();
+      openCreditAmountModal();
       return;
     }
 
@@ -2569,39 +2874,34 @@ export function CoinbaseDemo({
     (selectedFlow === "embedded" && !embeddedWalletReady);
   const selectedActionDisabled =
     actionDisabled ||
-    (selectedFlow === "embedded" && !embeddedEthSwapReady) ||
-    (selectedFlow === "x402" &&
-      (x402Stage === "requesting" || x402Stage === "settling"));
+    (selectedFlow === "x402" && isX402DemoRunning(x402Stage));
   const selectedActionLoading =
     checkoutCreating ||
     headlessCreating ||
     agentCreating ||
     agentChatRunning ||
     pushCreating ||
-    x402Stage === "requesting" ||
-    x402Stage === "settling";
+    isX402DemoRunning(x402Stage);
 
   const actionLabel =
     selectedFlow === "hosted"
       ? checkoutCreating
         ? "Creating..."
-        : "Create hosted checkout"
+        : "Buy credits"
       : selectedFlow === "embedded"
         ? checkoutCreating
           ? embeddedFundingAsset === "ETH"
             ? "Swapping & paying..."
             : "Submitting..."
           : embeddedWalletReady
-            ? embeddedFundingAsset === "ETH"
-              ? "Swap ETH & pay $0.01"
-              : "Pay $0.01 with embedded wallet"
-            : "Sign in to continue"
+            ? "Buy credits"
+            : "Sign in to buy credits"
         : selectedFlow === "x402"
-          ? x402Stage === "requesting" || x402Stage === "settling"
-            ? "Running handshake..."
+          ? isX402DemoRunning(x402Stage)
+            ? "Purchasing compute..."
             : x402Stage === "complete"
-              ? "Run it again"
-              : "Run 402 handshake"
+              ? `${activeX402Workload.actionLabel} again`
+              : activeX402Workload.actionLabel
         : selectedFlow === "headless"
           ? headlessCreating
             ? "Submitting..."
@@ -2816,7 +3116,14 @@ export function CoinbaseDemo({
     }
 
     if (selectedFlow === "x402") {
-      return <X402ProtocolPanel exchanges={x402Exchanges} stage={x402Stage} />;
+      return (
+        <X402ProtocolPanel
+          exchanges={x402Exchanges}
+          result={x402Result}
+          stage={x402Stage}
+          workload={x402Workload}
+        />
+      );
     }
 
     if (selectedFlow === "push") {
@@ -3203,24 +3510,24 @@ export function CoinbaseDemo({
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div className="space-y-2">
                   <p className="eyebrow">
-                    {selectedFlow === "x402" ? "Paid API" : "Payment"}
+                    {selectedFlow === "x402" ? "Machine-priced compute" : "Payment"}
                   </p>
                   <h2 className="display-font text-3xl font-semibold tracking-[-0.04em]">
                     {selectedFlow === "x402"
-                      ? "Agent-paid API request"
+                      ? "Pay for compute over HTTP"
                       : selectedFlow === "push"
                         ? "Receive a direct transfer"
-                        : selectedFlow === "embedded"
-                          ? "$0.01 embedded payment"
-                          : "$0.01 hosted checkout"}
+                        : selectedFlow === "embedded" || selectedFlow === "hosted"
+                          ? "Buy credits"
+                          : "$0.01 payment"}
                   </h2>
                   <p className="text-sm leading-7 text-[var(--ink-soft)]">
                     {selectedFlow === "hosted"
-                      ? "Create a secure Coinbase-hosted payment link."
+                      ? "Choose a credit amount, then complete payment on a secure Coinbase-hosted checkout."
                       : selectedFlow === "embedded"
-                        ? "Sign in, top up, and pay from a self-custodial wallet without leaving the product."
+                        ? "Choose a credit amount and pay from a self-custodial wallet without leaving the product."
                         : selectedFlow === "x402"
-                          ? "See the full HTTP payment handshake. This simulator never signs a wallet or moves funds."
+                          ? "Buy one model response or a short GPU lease. The server quotes the exact price, the client attaches payment proof, and the request retries automatically."
                           : selectedFlow === "agent"
                             ? "Create a signed Base USDC invoice, then chat with the agent to inspect and pay it under policy."
                             : "Create a wallet-native address for a direct BTC or ETH transfer."}
@@ -3332,14 +3639,61 @@ export function CoinbaseDemo({
               ) : null}
 
               {selectedFlow === "x402" ? (
-                <div className="x402-code-card">
-                  <div className="x402-code-head">
-                    <span>client.ts</span>
-                    <span>@x402/fetch</span>
+                <div className="x402-simulator">
+                  <div className="x402-workload-heading">
+                    <div>
+                      <p className="eyebrow">Choose the compute unit</p>
+                      <p>
+                        Each product exposes the same payment handshake with a
+                        different resource, price, and response.
+                      </p>
+                    </div>
                   </div>
-                  <pre>
-                    <code>{X402_CLIENT_SNIPPET}</code>
-                  </pre>
+
+                  <div className="x402-workload-grid" role="group" aria-label="Compute workload">
+                    {(Object.entries(X402_WORKLOADS) as Array<
+                      [X402WorkloadId, X402WorkloadConfig]
+                    >).map(([workloadId, workload]) => (
+                      <button
+                        aria-pressed={x402Workload === workloadId}
+                        className={`x402-workload-option${
+                          x402Workload === workloadId ? " is-active" : ""
+                        }`}
+                        disabled={
+                          isX402DemoRunning(x402Stage)
+                        }
+                        key={workloadId}
+                        onClick={() => handleSelectX402Workload(workloadId)}
+                        type="button"
+                      >
+                        <span className="x402-workload-option-top">
+                          <span>{workload.eyebrow}</span>
+                          <strong>{workload.priceUsdc} USDC</strong>
+                        </span>
+                        <b>{workload.title}</b>
+                        <small>{workload.description}</small>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="x402-workload-specs">
+                    {activeX402Workload.specs.map((spec) => (
+                      <div key={spec.label}>
+                        <span>{spec.label}</span>
+                        <strong>{spec.value}</strong>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="x402-code-card">
+                    <div className="x402-code-head">
+                      <span>client.ts</span>
+                      <span>@x402/fetch</span>
+                    </div>
+                    <pre>
+                      <code>{getX402ClientSnippet(x402Workload)}</code>
+                    </pre>
+                  </div>
                 </div>
               ) : null}
 
@@ -3348,10 +3702,20 @@ export function CoinbaseDemo({
                   <div>
                     <p className="text-sm font-semibold text-[var(--foreground)]">
                       {selectedFlow === "x402"
-                        ? "GET /api/x402/weather"
+                        ? activeX402Workload.unit
+                        : selectedFlow === "hosted" || selectedFlow === "embedded"
+                          ? "CoinBiz credits"
                         : TEST_CART.title}
                     </p>
-                    {TEST_CART.caption ? (
+                    {selectedFlow === "x402" ? (
+                      <p className="mt-1 font-mono text-xs text-[var(--ink-soft)]">
+                        POST /api/x402/compute
+                      </p>
+                    ) : selectedFlow === "hosted" || selectedFlow === "embedded" ? (
+                      <p className="mt-1 text-sm text-[var(--ink-soft)]">
+                        Add credits to your demo balance.
+                      </p>
+                    ) : TEST_CART.caption ? (
                       <p className="mt-1 text-sm text-[var(--ink-soft)]">
                         {TEST_CART.caption}
                       </p>
@@ -3359,7 +3723,11 @@ export function CoinbaseDemo({
                   </div>
                   <p className="text-lg font-semibold text-[var(--foreground)]">
                     {selectedFlow === "x402"
-                      ? "$0.001"
+                      ? `${activeX402Workload.priceUsdc} USDC`
+                      : selectedFlow === "hosted" || selectedFlow === "embedded"
+                        ? creditAmount === null
+                          ? "Choose amount"
+                          : formatAmount(creditAmount)
                       : formatAmount(TEST_CART.unitAmount)}
                   </p>
                 </div>
@@ -3384,7 +3752,11 @@ export function CoinbaseDemo({
                   </p>
                   <p className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-[var(--foreground)]">
                     {selectedFlow === "x402"
-                      ? "0.001 USDC"
+                      ? `${activeX402Workload.priceUsdc} USDC`
+                      : selectedFlow === "hosted" || selectedFlow === "embedded"
+                        ? creditAmount === null
+                          ? "Select amount"
+                          : formatAmount(creditAmount)
                       : formatAmount(
                           totalAmount,
                           selectedFlow === "push" ? "USD" : "USDC",
@@ -3425,6 +3797,133 @@ export function CoinbaseDemo({
             </aside> : null}
           </div>
         </section>
+      ) : null}
+
+      {creditAmountModalOpen &&
+      (selectedFlow === "hosted" || selectedFlow === "embedded") ? (
+        <div
+          className="credit-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target && !checkoutCreating) {
+              setCreditAmountModalOpen(false);
+            }
+          }}
+        >
+          <div
+            aria-describedby="credit-modal-description"
+            aria-labelledby="credit-modal-title"
+            aria-modal="true"
+            className="credit-modal"
+            role="dialog"
+          >
+            <div className="credit-modal-head">
+              <div>
+                <p className="eyebrow">
+                  {selectedFlow === "hosted"
+                    ? "Hosted checkout"
+                    : "Embedded checkout"}
+                </p>
+                <h2 id="credit-modal-title">Buy credits</h2>
+                <p id="credit-modal-description">
+                  Choose how much to add to your demo balance.
+                </p>
+              </div>
+              <button
+                aria-label="Close amount picker"
+                className="credit-modal-close"
+                disabled={checkoutCreating}
+                onClick={() => setCreditAmountModalOpen(false)}
+                type="button"
+              >
+                <CdsIcon name="close" size={16} />
+              </button>
+            </div>
+
+            <form onSubmit={(event) => void handleCreditAmountSubmit(event)}>
+              <div className="credit-amount-grid" role="group" aria-label="Credit amount">
+                {CREDIT_AMOUNT_PRESETS.map((option) => (
+                  <button
+                    aria-pressed={creditAmountPreset === option.value}
+                    autoFocus={creditAmountPreset === option.value}
+                    className={`${
+                      creditAmountPreset === option.value ? "is-active" : ""
+                    }${option.value === "other" ? " is-other" : ""}`}
+                    key={option.value}
+                    onClick={() => {
+                      setCreditAmountPreset(option.value);
+                      setCreditAmountError(null);
+                    }}
+                    type="button"
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+
+              {creditAmountPreset === "other" ? (
+                <label className="credit-custom-amount">
+                  <span>Custom amount</span>
+                  <span className="credit-custom-input">
+                    <b aria-hidden="true">$</b>
+                    <input
+                      aria-invalid={creditAmountError ? "true" : "false"}
+                      inputMode="decimal"
+                      max="10000"
+                      min="0.01"
+                      onChange={(event) => {
+                        setCustomCreditAmount(event.target.value);
+                        setCreditAmountError(null);
+                      }}
+                      placeholder="25.00"
+                      required
+                      step="0.01"
+                      type="number"
+                      value={customCreditAmount}
+                    />
+                    <em>USDC</em>
+                  </span>
+                </label>
+              ) : null}
+
+              {creditAmountError ? (
+                <p className="credit-modal-error" role="alert">
+                  {creditAmountError}
+                </p>
+              ) : (
+                <p className="credit-modal-note">
+                  {selectedCreditAmount === null
+                    ? "Enter a valid credit amount."
+                    : `${formatAmount(selectedCreditAmount)} will be charged through ${
+                        selectedFlow === "hosted"
+                          ? "the hosted checkout"
+                          : "your embedded wallet"
+                      }.`}
+                </p>
+              )}
+
+              <div className="credit-modal-actions">
+                <button
+                  className="cds-button cds-button-secondary"
+                  disabled={checkoutCreating}
+                  onClick={() => setCreditAmountModalOpen(false)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="cds-button cds-button-primary"
+                  disabled={checkoutCreating}
+                  type="submit"
+                >
+                  {selectedCreditAmount === null
+                    ? "Buy credits"
+                    : `Buy $${selectedCreditAmount.toFixed(2)} in credits`}
+                  <CdsIcon name="forwardArrow" size={16} />
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       ) : null}
     </main>
   );
